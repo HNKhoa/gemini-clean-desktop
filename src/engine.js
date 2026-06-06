@@ -157,19 +157,36 @@ function locateSparkle(imageData, alpha96) {
 
 export async function detectVideoWatermarkBox(file) {
   try {
-    const alphaMod = await getAlphaModule();
-    const alpha96 = alphaMod.getEmbeddedAlphaMap(96);
+    const alpha96 = (await getAlphaModule()).getEmbeddedAlphaMap(96);
     if (!alpha96) return null;
-    // Sample a couple of frames; keep the highest-confidence hit (sparkle is static).
-    let best = null;
-    for (const frac of [0.5, 0.25, 0.75]) {
+
+    // Average several frames. A moving/animated background blurs out in the
+    // average, while the STATIC watermark stays sharp — so NCC locks onto it even
+    // on busy backgrounds (e.g. animated gradients). Accumulate incrementally to
+    // keep memory bounded.
+    const fracs = [0.12, 0.24, 0.36, 0.48, 0.6, 0.72, 0.84, 0.96];
+    let sum = null, W = 0, H = 0, n = 0;
+    for (const f of fracs) {
       let frame;
-      try { frame = await grabVideoFrame(file, frac); } catch (_) { continue; }
-      const hit = locateSparkle(frame, alpha96);
-      if (hit && (!best || hit.score > best.score)) best = hit;
-      if (best && best.score > 0.6) break; // confident enough
+      try { frame = await grabVideoFrame(file, f); } catch (_) { continue; }
+      if (!sum) { W = frame.width; H = frame.height; sum = new Float32Array(W * H * 4); }
+      else if (frame.width !== W || frame.height !== H) continue;
+      const d = frame.data;
+      for (let i = 0; i < sum.length; i += 1) sum[i] += d[i];
+      n += 1;
     }
-    if (best) console.log('[engine] watermark detected at', best);
+    if (!n) return null;
+
+    const avg = new Uint8ClampedArray(sum.length);
+    for (let i = 0; i < avg.length; i += 1) avg[i] = sum[i] / n;
+    let best = locateSparkle({ width: W, height: H, data: avg }, alpha96);
+
+    // Fallback to a single mid frame if the average didn't yield a hit.
+    if (!best) {
+      try { best = locateSparkle(await grabVideoFrame(file, 0.5), alpha96); } catch (_) { /* ignore */ }
+    }
+
+    if (best) console.log('[engine] watermark detected at', best, '(frames averaged:', n, ')');
     else console.log('[engine] watermark not auto-detected; using preset');
     return best;
   } catch (e) {

@@ -287,6 +287,7 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
     let drawCtx = null;
     let aborted = false;
     let decodeQueue = [];
+    let decoderConfigured = false;
     let decoderFlushStarted = false;
     let decoderFlushed = false;
     let maxPendingFrames = 24;
@@ -366,7 +367,7 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
     };
 
     const maybeFlushDecoder = () => {
-      if (!isExtractionFinished || decoderFlushStarted || !videoDecoder || decodeQueue.length > 0) return;
+      if (!isExtractionFinished || decoderFlushStarted || !videoDecoder || !decoderConfigured || decodeQueue.length > 0) return;
       decoderFlushStarted = true;
       videoDecoder.flush()
         .then(() => {
@@ -651,6 +652,7 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
           if (videoDecoder) {
             const decoderConfig = await pickSupportedDecoderConfig(config);
             videoDecoder.configure(decoderConfig);
+            decoderConfigured = true;
           }
           await configureEncoder(config, trackInfo, audioInfo, hasUnsupportedAudio);
           pumpDecodeQueue();
