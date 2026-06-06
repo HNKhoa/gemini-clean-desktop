@@ -1,9 +1,9 @@
 import * as MP4Box from './vendor/mp4box.all.js';
 import * as Mp4Muxer from './vendor/mp4-muxer.mjs';
 
-const VIDEO_INTENSITY = 0.60;
-const VIDEO_OUTLINE_WIDTH = 2;
-const VIDEO_INPAINT_RADIUS = 4;
+const VIDEO_INTENSITY = 0.62;
+const VIDEO_OUTLINE_WIDTH = 3;
+const VIDEO_INPAINT_RADIUS = 6;
 const MAX_VIDEO_WORKERS = 12;
 const MAX_DECODE_QUEUE = 18;
 // Cap how many frames sit in the encoder's queue. Without this the encoder is
@@ -412,7 +412,17 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
       estimatedTotalFrames = trackInfo.frameCount > 0
         ? trackInfo.frameCount
         : Math.max(1, Math.round((trackInfo.durationSeconds ?? 1) * exportFps));
-      box = getWatermarkConfig(srcWidth, srcHeight);
+      // Use the auto-detected watermark box when available (handles arbitrary
+      // positions, e.g. vertical 4K); otherwise fall back to the fixed preset.
+      const wb = options.watermarkBox;
+      if (wb && wb.w > 0 && wb.h > 0 && wb.x >= 0 && wb.y >= 0 &&
+          wb.x + wb.w <= srcWidth && wb.y + wb.h <= srcHeight) {
+        box = { x: Math.round(wb.x), y: Math.round(wb.y), w: Math.round(wb.w), h: Math.round(wb.h) };
+        console.log('[gwr-video] watermark box (detected):', JSON.stringify(box));
+      } else {
+        box = getWatermarkConfig(srcWidth, srcHeight);
+        console.log('[gwr-video] watermark box (preset):', JSON.stringify(box));
+      }
       // Memory cost is driven by the decoded (source) frame size.
       const bigFrame = srcWidth * srcHeight > 1920 * 1080;
       maxPendingFrames = bigFrame ? Math.max(workers.length, 6) : Math.max(workers.length * 3, 18);
