@@ -163,6 +163,27 @@ def open_output():
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/api/open-path")
+def open_path(path: str = Form(...)):
+    """Open one cleaned file with the OS default app (must be inside output folder)."""
+    try:
+        p = pathlib.Path(path).resolve()
+        out = output_dir().resolve()
+        if out != p and out not in p.parents:
+            return JSONResponse({"ok": False, "error": "path outside output folder"}, status_code=403)
+        if not p.exists():
+            return JSONResponse({"ok": False, "error": "file not found"}, status_code=404)
+        if sys.platform.startswith("win"):
+            os.startfile(str(p))  # noqa: S606
+        elif sys.platform == "darwin":
+            os.system(f'open "{p}"')
+        else:
+            os.system(f'xdg-open "{p}"')
+        return {"ok": True}
+    except Exception as e:  # pragma: no cover
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 # ── Static (production): serve the built React app + /engine. Mount LAST so the
 #    /api routes above take precedence. In dev, Vite serves the frontend. ──────
 if DIST_DIR.exists():
