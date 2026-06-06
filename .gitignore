@@ -1,0 +1,10 @@
+node_modules/
+dist/
+backend/__pycache__/
+backend/*.db
+*.spec
+build/
+release/
+backend/pybuild/
+*.exe
+.venv/
