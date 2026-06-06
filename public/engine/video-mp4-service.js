@@ -65,6 +65,27 @@ async function pickSupportedVideoEncoderConfig(base, preferredCodec, targetBitra
   return { ...base, codec: preferredCodec, bitrate: 12_000_000, hardwareAcceleration: 'no-preference', latencyMode: 'quality' };
 }
 
+// Pick a VideoDecoder config the machine can actually decode. Hardware H.264
+// decoders frequently fail on large/odd resolutions (e.g. 2160x3840 4K
+// vertical), which surfaces as an async "Decoding error". For large frames we
+// try SOFTWARE first (reliable at any resolution); for small frames hardware
+// first (fast). isConfigSupported() narrows to a config the browser accepts.
+async function pickSupportedDecoderConfig(config) {
+  const pixels = (config.codedWidth || 0) * (config.codedHeight || 0);
+  const large = pixels > 1920 * 1080;
+  const accels = large ? ['prefer-software', 'no-preference'] : ['no-preference', 'prefer-software'];
+  if (typeof VideoDecoder !== 'undefined' && typeof VideoDecoder.isConfigSupported === 'function') {
+    for (const accel of accels) {
+      const cfg = { ...config, hardwareAcceleration: accel };
+      try {
+        const probe = await VideoDecoder.isConfigSupported(cfg);
+        if (probe && probe.supported) return probe.config || cfg;
+      } catch (_) { /* try next candidate */ }
+    }
+  }
+  return { ...config, hardwareAcceleration: large ? 'prefer-software' : 'no-preference' };
+}
+
 function cleanBaseName(filename) {
   const dotIndex = filename.lastIndexOf('.');
   const base = dotIndex > 0 ? filename.slice(0, dotIndex) : filename;
@@ -359,7 +380,10 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
         ? trackInfo.frameCount
         : Math.max(1, Math.round((trackInfo.durationSeconds ?? 1) * exportFps));
       box = getWatermarkConfig(outputWidth, outputHeight);
-      maxPendingFrames = Math.max(workers.length * 3, 18);
+      // Large (4K) frames cost a lot of memory per pending bitmap, so keep
+      // fewer in flight to avoid exhausting RAM on long high-res videos.
+      const bigFrame = outputWidth * outputHeight > 1920 * 1080;
+      maxPendingFrames = bigFrame ? Math.max(workers.length, 6) : Math.max(workers.length * 3, 18);
 
       if (hasUnsupportedAudio) {
         unsupportedAudioWarning = 'Audio codec unsupported; exported video-only MP4.';
@@ -532,7 +556,10 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
       file,
       async (config, trackInfo, audioInfo, hasUnsupportedAudio) => {
         try {
-          videoDecoder?.configure(config);
+          if (videoDecoder) {
+            const decoderConfig = await pickSupportedDecoderConfig(config);
+            videoDecoder.configure(decoderConfig);
+          }
           await configureEncoder(config, trackInfo, audioInfo, hasUnsupportedAudio);
           pumpDecodeQueue();
         } catch (error) {
