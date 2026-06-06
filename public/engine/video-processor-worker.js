@@ -145,6 +145,86 @@ function repairOutline(data, alphaMap, width, height, outlineWidth, inpaintRadiu
   }
 }
 
+// Clamped separable box blur of an RGBA buffer (small region; used to dissolve
+// any thin residual watermark outline).
+function boxBlurRGBA(src, width, height, radius) {
+  const tmp = new Float32Array(width * height * 3);
+  const out = new Uint8ClampedArray(src.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let r = 0, g = 0, b = 0, c = 0;
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const xx = x + dx; if (xx < 0 || xx >= width) continue;
+        const o = (y * width + xx) * 4; r += src[o]; g += src[o + 1]; b += src[o + 2]; c += 1;
+      }
+      const t = (y * width + x) * 3; tmp[t] = r / c; tmp[t + 1] = g / c; tmp[t + 2] = b / c;
+    }
+  }
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let r = 0, g = 0, b = 0, c = 0;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const yy = y + dy; if (yy < 0 || yy >= height) continue;
+        const t = (yy * width + x) * 3; r += tmp[t]; g += tmp[t + 1]; b += tmp[t + 2]; c += 1;
+      }
+      const o = (y * width + x) * 4; out[o] = r / c; out[o + 1] = g / c; out[o + 2] = b / c; out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
+function smooth01(t, a, b) {
+  t = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+// Blur away the watermark region (logo body + tips) and feather it into the
+// surrounding margin so there is no seam. Centred on the logo; fully blurred out
+// to just past the tips (rFull), then fades to the original by rEnd (in margin).
+function softenCrop(data, width, height, cx, cy, wmRadius) {
+  const blurRadius = Math.max(3, Math.round(wmRadius / 3.5));
+  const blurred = boxBlurRGBA(data, width, height, blurRadius);
+  const rFull = wmRadius * 1.08;
+  const rEnd = wmRadius * 1.85;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const dist = Math.hypot(x - cx, y - cy);
+      let m;
+      if (dist <= rFull) m = 1;
+      else if (dist >= rEnd) m = 0;
+      else m = 1 - smooth01(dist, rFull, rEnd);
+      if (m <= 0.002) continue;
+      const off = (y * width + x) * 4;
+      data[off] = clamp(data[off] * (1 - m) + blurred[off] * m);
+      data[off + 1] = clamp(data[off + 1] * (1 - m) + blurred[off + 1] * m);
+      data[off + 2] = clamp(data[off + 2] * (1 - m) + blurred[off + 2] * m);
+    }
+  }
+}
+
+// Process one expanded crop: reverse-alpha + outline repair on the inner
+// (aligned) logo region, then a radial blur that dissolves the logo and feathers
+// into the margin (eliminates the residual outline/tips on smooth backgrounds).
+function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensity, outlineWidth, inpaintRadius) {
+  const inner = new Uint8ClampedArray(innerW * innerH * 4);
+  for (let iy = 0; iy < innerH; iy += 1) {
+    for (let ix = 0; ix < innerW; ix += 1) {
+      const s = ((innerY + iy) * cropW + (innerX + ix)) * 4;
+      const dst = (iy * innerW + ix) * 4;
+      inner[dst] = data[s]; inner[dst + 1] = data[s + 1]; inner[dst + 2] = data[s + 2]; inner[dst + 3] = data[s + 3];
+    }
+  }
+  removeWatermarkFromData(inner, innerW, innerH, intensity, outlineWidth, inpaintRadius);
+  for (let iy = 0; iy < innerH; iy += 1) {
+    for (let ix = 0; ix < innerW; ix += 1) {
+      const dst = ((innerY + iy) * cropW + (innerX + ix)) * 4;
+      const s = (iy * innerW + ix) * 4;
+      data[dst] = inner[s]; data[dst + 1] = inner[s + 1]; data[dst + 2] = inner[s + 2];
+    }
+  }
+  softenCrop(data, cropW, cropH, innerX + innerW / 2, innerY + innerH / 2, Math.max(innerW, innerH) / 2);
+}
+
 function removeWatermarkFromData(data, width, height, intensity, outlineWidth, inpaintRadius) {
   const alphaMap = getAlphaMap(width);
   const original = new Uint8ClampedArray(data);
@@ -167,6 +247,8 @@ function removeWatermarkFromData(data, width, height, intensity, outlineWidth, i
 if (typeof self !== 'undefined') {
 self.onmessage = async (event) => {
   const { id, frameBitmap, x, y, w, h, intensity, outlineWidth, inpaintRadius } = event.data;
+  let { innerX, innerY, innerW, innerH } = event.data;
+  if (!innerW || !innerH) { innerX = 0; innerY = 0; innerW = w; innerH = h; }
 
   if (!offscreenCanvas || offscreenCanvas.width !== w || offscreenCanvas.height !== h) {
     offscreenCanvas = new OffscreenCanvas(w, h);
@@ -182,7 +264,7 @@ self.onmessage = async (event) => {
       offscreenCtx.drawImage(frameBitmap, x, y, w, h, 0, 0, w, h);
     }
     const imageData = offscreenCtx.getImageData(0, 0, w, h);
-    removeWatermarkFromData(imageData.data, w, h, intensity, outlineWidth, inpaintRadius);
+    processCrop(imageData.data, w, h, innerX, innerY, innerW, innerH, intensity, outlineWidth, inpaintRadius);
     offscreenCtx.putImageData(imageData, 0, 0);
     finalBitmap = await createImageBitmap(offscreenCanvas);
     self.postMessage({ id, processedBox: finalBitmap }, [finalBitmap]);

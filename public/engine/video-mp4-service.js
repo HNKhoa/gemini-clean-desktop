@@ -272,6 +272,10 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
     let scaleCanvas = null;
     let scaleCtx = null;
     let box = getWatermarkConfig(1920, 1080);
+    let wmInnerX = 0;
+    let wmInnerY = 0;
+    let wmInnerW = box.w;
+    let wmInnerH = box.h;
     let pendingFrames = 0;
     let frameOrder = [];
     let chunkCount = 0;
@@ -412,17 +416,31 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
       estimatedTotalFrames = trackInfo.frameCount > 0
         ? trackInfo.frameCount
         : Math.max(1, Math.round((trackInfo.durationSeconds ?? 1) * exportFps));
-      // Use the auto-detected watermark box when available (handles arbitrary
-      // positions, e.g. vertical 4K); otherwise fall back to the fixed preset.
+      // Determine the watermark region: auto-detected box (handles arbitrary
+      // positions, e.g. vertical 4K) or the fixed preset.
+      let wmRegion;
       const wb = options.watermarkBox;
       if (wb && wb.w > 0 && wb.h > 0 && wb.x >= 0 && wb.y >= 0 &&
           wb.x + wb.w <= srcWidth && wb.y + wb.h <= srcHeight) {
-        box = { x: Math.round(wb.x), y: Math.round(wb.y), w: Math.round(wb.w), h: Math.round(wb.h) };
-        console.log('[gwr-video] watermark box (detected):', JSON.stringify(box));
+        wmRegion = { x: Math.round(wb.x), y: Math.round(wb.y), w: Math.round(wb.w), h: Math.round(wb.h) };
+        console.log('[gwr-video] watermark (detected):', JSON.stringify(wmRegion));
       } else {
-        box = getWatermarkConfig(srcWidth, srcHeight);
-        console.log('[gwr-video] watermark box (preset):', JSON.stringify(box));
+        wmRegion = getWatermarkConfig(srcWidth, srcHeight);
+        console.log('[gwr-video] watermark (preset):', JSON.stringify(wmRegion));
       }
+      // Expand the processed crop with a margin so the soften pass can feather the
+      // logo (incl. its tips) into the background seamlessly. Reverse-alpha still
+      // runs on the inner (aligned) region inside the worker.
+      const wmMargin = Math.round(Math.max(wmRegion.w, wmRegion.h) * 0.45);
+      const cropX = Math.max(0, wmRegion.x - wmMargin);
+      const cropY = Math.max(0, wmRegion.y - wmMargin);
+      const cropW = Math.min(srcWidth - cropX, wmRegion.w + 2 * wmMargin);
+      const cropH = Math.min(srcHeight - cropY, wmRegion.h + 2 * wmMargin);
+      box = { x: cropX, y: cropY, w: cropW, h: cropH };
+      wmInnerX = wmRegion.x - cropX;
+      wmInnerY = wmRegion.y - cropY;
+      wmInnerW = wmRegion.w;
+      wmInnerH = wmRegion.h;
       // Memory cost is driven by the decoded (source) frame size.
       const bigFrame = srcWidth * srcHeight > 1920 * 1080;
       maxPendingFrames = bigFrame ? Math.max(workers.length, 6) : Math.max(workers.length * 3, 18);
@@ -595,6 +613,10 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
             y: box.y,
             w: box.w,
             h: box.h,
+            innerX: wmInnerX,
+            innerY: wmInnerY,
+            innerW: wmInnerW,
+            innerH: wmInnerH,
             intensity: VIDEO_INTENSITY,
             outlineWidth: VIDEO_OUTLINE_WIDTH,
             inpaintRadius: VIDEO_INPAINT_RADIUS

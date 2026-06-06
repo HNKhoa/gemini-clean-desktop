@@ -46,6 +46,17 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def no_store_dynamic(request, call_next):
+    """Engine modules + worker + index.html use stable filenames, so the renderer
+    could serve a stale cached copy after an update. Force fresh fetches for
+    everything except Vite's content-hashed /assets (safe to cache)."""
+    resp = await call_next(request)
+    if not request.url.path.startswith("/assets"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 # ── DB helpers ──────────────────────────────────────────────────────────────
 def db():
     conn = sqlite3.connect(str(DB_PATH))
