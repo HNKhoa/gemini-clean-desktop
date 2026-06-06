@@ -2,11 +2,24 @@
 const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 const http = require('http');
+const net = require('net');
 const { spawn } = require('child_process');
 
 const DEV = process.env.ELECTRON_DEV === '1';
-const PORT = 8000;
+let PORT = 8000; // prod: replaced with a free port at startup to avoid conflicts
 let backendProc = null;
+
+// Ask the OS for a free localhost TCP port (the prod backend binds to it).
+function getFreePort() {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(0));
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
 
 // In production we launch the Python backend (it serves the built React app +
 // engine + /api). In dev the backend is started by the npm "dev" script and
@@ -72,7 +85,11 @@ function createWindow() {
   win.loadURL(DEV ? 'http://localhost:5173' : `http://127.0.0.1:${PORT}`);
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (!DEV) {
+    const free = await getFreePort();
+    if (free) PORT = free;
+  }
   startBackend();
   if (DEV) {
     createWindow();
