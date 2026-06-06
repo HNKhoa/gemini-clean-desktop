@@ -23,7 +23,46 @@ function chooseExportBitrate(width, height, trackInfo, fps) {
   const pixels = width * height;
   const resolutionFloor = Math.round(pixels * fps * 0.32);
   const sourceBoost = trackInfo.bitrate ? Math.round(trackInfo.bitrate * 1.5) : 0;
-  return Math.min(120_000_000, Math.max(12_000_000, resolutionFloor, sourceBoost));
+  // Cap at 60 Mbps: 120 Mbps exceeds what many hardware H.264 encoders accept
+  // for these codec levels and triggers "Encoder creation error".
+  return Math.min(60_000_000, Math.max(12_000_000, resolutionFloor, sourceBoost));
+}
+
+// Pick a VideoEncoder config the current machine actually supports.
+// Some hardware H.264 encoders reject configs that software encoders accept
+// (e.g. a bitrate above the codec level cap), which surfaces as the async
+// "Encoder creation error". We probe candidates with isConfigSupported() —
+// preferring the requested quality, then a higher level, then lower bitrate —
+// and DON'T force hardware, so the browser can fall back to software when the
+// hardware encoder can't honor the config.
+async function pickSupportedVideoEncoderConfig(base, preferredCodec, targetBitrate) {
+  const HIGH_L51 = 'avc1.640033'; // High@L5.1 — allows higher bitrate/resolution
+  const codecs = preferredCodec === HIGH_L51 ? [HIGH_L51] : [preferredCodec, HIGH_L51];
+  const bitrates = [];
+  for (const b of [targetBitrate, 24_000_000, 12_000_000]) {
+    const v = Math.max(2_000_000, Math.min(targetBitrate, b));
+    if (!bitrates.includes(v)) bitrates.push(v);
+  }
+  const candidates = [];
+  const seen = new Set();
+  for (const codec of codecs) {
+    for (const bitrate of bitrates) {
+      const key = codec + ':' + bitrate;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push({ ...base, codec, bitrate, hardwareAcceleration: 'no-preference', latencyMode: 'quality' });
+    }
+  }
+  if (typeof VideoEncoder !== 'undefined' && typeof VideoEncoder.isConfigSupported === 'function') {
+    for (const cfg of candidates) {
+      try {
+        const probe = await VideoEncoder.isConfigSupported(cfg);
+        if (probe && probe.supported) return probe.config || cfg;
+      } catch (_) { /* try next candidate */ }
+    }
+  }
+  // Last resort if nothing probed as supported.
+  return { ...base, codec: preferredCodec, bitrate: 12_000_000, hardwareAcceleration: 'no-preference', latencyMode: 'quality' };
 }
 
 function cleanBaseName(filename) {
@@ -304,7 +343,7 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
       maybeFlushDecoder();
     };
 
-    const configureEncoder = (config, trackInfo, audioInfo, hasUnsupportedAudio) => {
+    const configureEncoder = async (config, trackInfo, audioInfo, hasUnsupportedAudio) => {
       if (encoderConfigured) return;
       checkAbort();
 
@@ -347,15 +386,15 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
         firstTimestampBehavior: audioInfo ? 'cross-track-offset' : 'offset'
       });
 
-      const encoderConfig = {
-        codec: chooseAvcCodec(outputWidth, outputHeight, exportFps),
-        width: outputWidth,
-        height: outputHeight,
-        bitrate: chooseExportBitrate(outputWidth, outputHeight, trackInfo, exportFps),
-        framerate: exportFps,
-        hardwareAcceleration: 'prefer-hardware',
-        latencyMode: 'quality'
-      };
+      const targetBitrate = chooseExportBitrate(outputWidth, outputHeight, trackInfo, exportFps);
+      const baseCodec = chooseAvcCodec(outputWidth, outputHeight, exportFps);
+      const encoderConfig = await pickSupportedVideoEncoderConfig(
+        { width: outputWidth, height: outputHeight, framerate: exportFps },
+        baseCodec,
+        targetBitrate
+      );
+      checkAbort();
+      console.log('[gwr-video] encoder:', encoderConfig.codec, encoderConfig.hardwareAcceleration, Math.round(encoderConfig.bitrate / 1e6) + 'Mbps');
       videoEncoder.configure(encoderConfig);
 
       drawCanvas = document.createElement('canvas');
@@ -491,10 +530,10 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
 
     extractFrames(
       file,
-      (config, trackInfo, audioInfo, hasUnsupportedAudio) => {
+      async (config, trackInfo, audioInfo, hasUnsupportedAudio) => {
         try {
-          configureEncoder(config, trackInfo, audioInfo, hasUnsupportedAudio);
           videoDecoder?.configure(config);
+          await configureEncoder(config, trackInfo, audioInfo, hasUnsupportedAudio);
           pumpDecodeQueue();
         } catch (error) {
           fail(error);
