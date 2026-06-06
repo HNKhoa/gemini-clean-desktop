@@ -93,14 +93,14 @@ export async function processImage(file) {
   return { blob, name: `clean_${baseName(file.name)}.${fmt.ext}`, kind: 'image', applied };
 }
 
-export async function processVideo(file, onProgress, signal) {
+export async function processVideo(file, onProgress, signal, maxOutputDimension = 1920) {
   const { processVideoWatermarkMp4 } = await getVideoService();
   const result = await processVideoWatermarkMp4(file, ({ progress, currentFrame, totalFrames, speedFps, warning }) => {
     const info = currentFrame && totalFrames
       ? `${currentFrame}/${totalFrames}${speedFps ? ` · ${speedFps.toFixed(1)}fps` : ''}`
       : (warning || '');
     onProgress(Math.max(0.02, Math.min(0.98, (progress || 0) / 100)), info);
-  }, signal);
+  }, signal, { maxOutputDimension });
   return {
     blob: result.blob,
     name: result.filename || `clean_${baseName(file.name)}.mp4`,

@@ -6,6 +6,12 @@ const VIDEO_OUTLINE_WIDTH = 2;
 const VIDEO_INPAINT_RADIUS = 4;
 const MAX_VIDEO_WORKERS = 12;
 const MAX_DECODE_QUEUE = 18;
+// Cap how many frames sit in the encoder's queue. Without this the encoder is
+// flooded with every frame at once; its internal buffer then holds gigabytes of
+// raw frame data and the codec stalls / gets "reclaimed due to inactivity"
+// (notably on long 4K clips). We stop decoding when the queue is full and resume
+// from the encoder's output callback as it drains.
+const MAX_ENCODE_QUEUE = 12;
 
 function normalizeFps(fps) {
   if (!fps || !Number.isFinite(fps) || fps <= 0) return 30;
@@ -21,11 +27,21 @@ function chooseAvcCodec(width, height, fps) {
 
 function chooseExportBitrate(width, height, trackInfo, fps) {
   const pixels = width * height;
-  const resolutionFloor = Math.round(pixels * fps * 0.32);
-  const sourceBoost = trackInfo.bitrate ? Math.round(trackInfo.bitrate * 1.5) : 0;
-  // Cap at 60 Mbps: 120 Mbps exceeds what many hardware H.264 encoders accept
-  // for these codec levels and triggers "Encoder creation error".
-  return Math.min(60_000_000, Math.max(12_000_000, resolutionFloor, sourceBoost));
+  // Resolution-based target (computed on the OUTPUT size). Keeps software encode
+  // fast and file sizes sane. ~12 Mbps @ 1080p30, ~5.5 @ 720p30.
+  const target = Math.round(pixels * fps * 0.2);
+  return Math.min(28_000_000, Math.max(8_000_000, target));
+}
+
+// Downscale a (w,h) so its long side is <= maxDim, preserving aspect ratio and
+// keeping both dimensions even (required by H.264). Returns the original if
+// already within maxDim or maxDim is falsy.
+function fitWithin(width, height, maxDim) {
+  if (!maxDim || Math.max(width, height) <= maxDim) return { width, height };
+  const scale = maxDim / Math.max(width, height);
+  const w = Math.max(2, Math.round((width * scale) / 2) * 2);
+  const h = Math.max(2, Math.round((height * scale) / 2) * 2);
+  return { width: w, height: h };
 }
 
 // Pick a VideoEncoder config the current machine actually supports.
@@ -225,11 +241,15 @@ async function extractFrames(file, onConfig, onChunk, onFinish, onAudioChunk) {
   });
 }
 
-export async function processVideoWatermarkMp4(file, onProgress, signal) {
+export async function processVideoWatermarkMp4(file, onProgress, signal, options = {}) {
   if (!('VideoDecoder' in window) || !('VideoEncoder' in window)) {
     throw new Error('Chrome WebCodecs is required for MP4 video processing.');
   }
   if (signal?.aborted) throw new Error('Cancelled');
+
+  // Cap the OUTPUT long side (0 = keep original). Large inputs (4K) are
+  // downscaled so software H.264 encode stays fast and memory stays bounded.
+  const maxOutputDimension = Number(options.maxOutputDimension) > 0 ? Number(options.maxOutputDimension) : 0;
 
   const startedAt = Date.now();
   const workers = [];
@@ -247,6 +267,10 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
     let estimatedTotalFrames = 1;
     let outputWidth = 0;
     let outputHeight = 0;
+    let srcWidth = 0;
+    let srcHeight = 0;
+    let scaleCanvas = null;
+    let scaleCtx = null;
     let box = getWatermarkConfig(1920, 1080);
     let pendingFrames = 0;
     let frameOrder = [];
@@ -330,7 +354,9 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
     };
 
     const maybeFinishExport = () => {
-      if (isExtractionFinished && decoderFlushed && pendingFrames === 0 && decodeFinishedCount === chunkCount) {
+      // Done when extraction finished, the decoder fully flushed (every frame it
+      // will emit has been emitted) and all emitted frames are encoded.
+      if (isExtractionFinished && decoderFlushed && pendingFrames === 0) {
         finishExport();
       }
     };
@@ -351,7 +377,8 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
       while (
         decodeQueue.length > 0 &&
         videoDecoder.decodeQueueSize < MAX_DECODE_QUEUE &&
-        pendingFrames < maxPendingFrames
+        pendingFrames < maxPendingFrames &&
+        (videoEncoder ? videoEncoder.encodeQueueSize < MAX_ENCODE_QUEUE : true)
       ) {
         const chunk = decodeQueue.shift();
         try {
@@ -368,21 +395,26 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
       if (encoderConfigured) return;
       checkAbort();
 
-      outputWidth = config.codedWidth ?? 0;
-      outputHeight = config.codedHeight ?? 0;
-      if (!outputWidth || !outputHeight) {
+      srcWidth = config.codedWidth ?? 0;
+      srcHeight = config.codedHeight ?? 0;
+      if (!srcWidth || !srcHeight) {
         throw new Error('Could not read video dimensions.');
       }
+      // Output may be downscaled (e.g. 4K -> 1080p) so software H.264 encode
+      // stays fast and memory bounded. Watermark removal still runs at source res.
+      const fitted = fitWithin(srcWidth, srcHeight, maxOutputDimension);
+      outputWidth = fitted.width;
+      outputHeight = fitted.height;
+      const downscaling = outputWidth !== srcWidth || outputHeight !== srcHeight;
 
       exportFps = normalizeFps(trackInfo.frameRate);
       keyFrameInterval = Math.max(1, Math.round(exportFps * 2));
       estimatedTotalFrames = trackInfo.frameCount > 0
         ? trackInfo.frameCount
         : Math.max(1, Math.round((trackInfo.durationSeconds ?? 1) * exportFps));
-      box = getWatermarkConfig(outputWidth, outputHeight);
-      // Large (4K) frames cost a lot of memory per pending bitmap, so keep
-      // fewer in flight to avoid exhausting RAM on long high-res videos.
-      const bigFrame = outputWidth * outputHeight > 1920 * 1080;
+      box = getWatermarkConfig(srcWidth, srcHeight);
+      // Memory cost is driven by the decoded (source) frame size.
+      const bigFrame = srcWidth * srcHeight > 1920 * 1080;
       maxPendingFrames = bigFrame ? Math.max(workers.length, 6) : Math.max(workers.length * 3, 18);
 
       if (hasUnsupportedAudio) {
@@ -418,21 +450,34 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
         targetBitrate
       );
       checkAbort();
-      console.log('[gwr-video] encoder:', encoderConfig.codec, encoderConfig.hardwareAcceleration, Math.round(encoderConfig.bitrate / 1e6) + 'Mbps');
+      console.log('[gwr-video] encoder:', `${srcWidth}x${srcHeight}->${outputWidth}x${outputHeight}`, encoderConfig.codec, encoderConfig.hardwareAcceleration, Math.round(encoderConfig.bitrate / 1e6) + 'Mbps');
       videoEncoder.configure(encoderConfig);
 
+      // Composite (watermark removal) happens on a source-res canvas...
       drawCanvas = document.createElement('canvas');
-      drawCanvas.width = outputWidth;
-      drawCanvas.height = outputHeight;
+      drawCanvas.width = srcWidth;
+      drawCanvas.height = srcHeight;
       drawCtx = drawCanvas.getContext('2d');
       if (!drawCtx) throw new Error('Canvas 2D is not available.');
+      // ...then, when downscaling, it's scaled down into the output-res canvas.
+      if (downscaling) {
+        scaleCanvas = document.createElement('canvas');
+        scaleCanvas.width = outputWidth;
+        scaleCanvas.height = outputHeight;
+        scaleCtx = scaleCanvas.getContext('2d');
+        if (scaleCtx) { scaleCtx.imageSmoothingEnabled = true; scaleCtx.imageSmoothingQuality = 'high'; }
+      }
 
       encoderConfigured = true;
       onProgress({ progress: 0, currentFrame: 0, totalFrames: estimatedTotalFrames, speedFps: 0, warning: unsupportedAudioWarning });
     };
 
     videoEncoder = new VideoEncoder({
-      output: (chunk, meta) => muxer?.addVideoChunk(chunk, meta),
+      output: (chunk, meta) => {
+        muxer?.addVideoChunk(chunk, meta);
+        // Encoder drained a slot — resume decoding if we were backpressured.
+        pumpDecodeQueue();
+      },
       error: fail
     });
 
@@ -465,9 +510,15 @@ export async function processVideoWatermarkMp4(file, onProgress, signal) {
             drawCtx.drawImage(frame.processedBox, frame.x, frame.y);
           }
 
+          let frameSource = drawCanvas;
+          if (scaleCanvas && scaleCtx) {
+            scaleCtx.drawImage(drawCanvas, 0, 0, scaleCanvas.width, scaleCanvas.height);
+            frameSource = scaleCanvas;
+          }
+
           const frameInit = { timestamp: frame.timestamp };
           if (typeof frame.duration === 'number') frameInit.duration = frame.duration;
-          const outFrame = new VideoFrame(drawCanvas, frameInit);
+          const outFrame = new VideoFrame(frameSource, frameInit);
           videoEncoder.encode(outFrame, { keyFrame: totalEncoded % keyFrameInterval === 0 });
           outFrame.close();
           totalEncoded += 1;
