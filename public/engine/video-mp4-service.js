@@ -404,12 +404,21 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
       if (!srcWidth || !srcHeight) {
         throw new Error('Could not read video dimensions.');
       }
-      // Output may be downscaled (e.g. 4K -> 1080p) so software H.264 encode
-      // stays fast and memory bounded. Watermark removal still runs at source res.
-      const fitted = fitWithin(srcWidth, srcHeight, maxOutputDimension);
+      // Keep the original resolution for short/light videos; only downscale very
+      // heavy ones (long 4K) where software H.264 encode would be too slow / RAM
+      // heavy. Decision is based on total work = pixels x frame-count.
+      const estFrames = trackInfo.frameCount > 0
+        ? trackInfo.frameCount
+        : Math.max(1, Math.round((trackInfo.durationSeconds ?? 1) * normalizeFps(trackInfo.frameRate)));
+      const workload = srcWidth * srcHeight * estFrames; // pixel-frames
+      const DOWNSCALE_WORKLOAD = 4.5e9; // ~18s of 4K@30; short clips keep full res
+      const fitted = (maxOutputDimension > 0 && workload > DOWNSCALE_WORKLOAD)
+        ? fitWithin(srcWidth, srcHeight, maxOutputDimension)
+        : { width: srcWidth, height: srcHeight };
       outputWidth = fitted.width;
       outputHeight = fitted.height;
       const downscaling = outputWidth !== srcWidth || outputHeight !== srcHeight;
+      console.log('[gwr-video] workload(GP-frames)=', (workload / 1e9).toFixed(2), 'downscaling=', downscaling);
 
       exportFps = normalizeFps(trackInfo.frameRate);
       keyFrameInterval = Math.max(1, Math.round(exportFps * 2));
