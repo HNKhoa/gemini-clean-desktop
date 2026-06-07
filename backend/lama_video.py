@@ -237,12 +237,23 @@ def _detect_box(frames_dir, files, W, H):
 
 
 def _encode(frames_dir, fps, in_path, out_path):
-    args = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", f"{fps}",
+    # High-quality video re-encode (CRF 18 ≈ visually transparent). Resolution is
+    # preserved. Audio is COPIED untouched when possible (no re-encode = no audio
+    # quality loss); only if the source audio can't be copied into MP4 do we fall
+    # back to a high-bitrate AAC re-encode.
+    base = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", f"{fps}",
             "-i", os.path.join(frames_dir, "%05d.png")]
+    venc = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium"]
     if _has_audio(in_path):
-        args += ["-i", in_path, "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-shortest"]
-    args += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium", out_path]
-    _run(args, "ffmpeg encode")
+        amap = ["-i", in_path, "-map", "0:v", "-map", "1:a", "-shortest"]
+        try:
+            _run(base + amap + ["-c:a", "copy"] + venc + [out_path], "ffmpeg encode")
+            return
+        except Exception:
+            pass  # audio not MP4-copyable → re-encode
+        _run(base + amap + ["-c:a", "aac", "-b:a", "192k"] + venc + [out_path], "ffmpeg encode")
+    else:
+        _run(base + venc + [out_path], "ffmpeg encode")
 
 
 def process_video(in_path, out_path, progress=None, should_cancel=None):
