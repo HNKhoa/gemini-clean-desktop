@@ -188,16 +188,20 @@ def health():
     return {"ok": True}
 
 
+AI_QUALITIES = ("standard", "high", "near_lossless")
+
+
 @app.get("/api/settings")
 def settings_get():
     return {
         "output_dir": get_setting("output_dir", DEFAULT_OUTPUT_DIR),
         "ai_inpaint": get_setting("ai_inpaint", "0"),
+        "ai_quality": get_setting("ai_quality", "standard"),
     }
 
 
 @app.post("/api/settings")
-def settings_set(output_dir: str = Form(...), ai_inpaint: str = Form(None)):
+def settings_set(output_dir: str = Form(...), ai_inpaint: str = Form(None), ai_quality: str = Form(None)):
     try:
         validated = validate_output_dir(output_dir)
     except ValueError as e:
@@ -205,7 +209,14 @@ def settings_set(output_dir: str = Form(...), ai_inpaint: str = Form(None)):
     set_setting("output_dir", validated)
     if ai_inpaint is not None:
         set_setting("ai_inpaint", "1" if str(ai_inpaint) in ("1", "true", "on", "yes") else "0")
-    return {"ok": True, "output_dir": get_setting("output_dir"), "ai_inpaint": get_setting("ai_inpaint", "0")}
+    if ai_quality is not None and ai_quality in AI_QUALITIES:
+        set_setting("ai_quality", ai_quality)
+    return {
+        "ok": True,
+        "output_dir": get_setting("output_dir"),
+        "ai_inpaint": get_setting("ai_inpaint", "0"),
+        "ai_quality": get_setting("ai_quality", "standard"),
+    }
 
 
 @app.post("/api/save")
@@ -375,7 +386,8 @@ def _run_ai_job(job_id, in_path, orig_name, job_dir):
             job["progress"] = round(d / t, 4) if t else 0
 
         info = lama_video.process_video(in_path, out_tmp, progress=prog,
-                                        should_cancel=lambda: bool(job.get("cancel")))
+                                        should_cancel=lambda: bool(job.get("cancel")),
+                                        quality=get_setting("ai_quality", "standard"))
         if job.get("cancel"):
             raise RuntimeError("cancelled")
         folder = output_dir()

@@ -54,6 +54,7 @@ Reverse-alpha removes the logo but can leave a faint trace on sharp/structured b
 - Runs in the **Python backend** (onnxruntime + ffmpeg), frame by frame, then re-encodes with the original audio.
 - The model (~88 MB, Apache-2.0 `opencv/inpainting_lama`) is **downloaded once** to `%USERPROFILE%\.gemini-clean\models\` on first use, then works offline.
 - **GPU**: DirectML cannot run LaMa's Fourier-conv ops, so it auto-falls back to CPU. For an **NVIDIA GPU** (e.g. GTX 1660 Ti), run **`setup-gpu.bat`** once to install the CUDA build (`onnxruntime-gpu` + CUDA 12 libs via pip) — much faster than CPU. A startup warm-up validates the provider and falls back to CPU if it can't execute the model.
+- **Quality**: Settings → "Chất lượng video AI" — Standard (CRF 18, default), High (CRF 16), or Near-lossless (CRF 12, ~2–3× the file, slower). Resolution is preserved and the original audio is copied losslessly at every level; only the (unavoidable) single video re-encode differs. The source is already lossy, so CRF 12 is the practical ceiling.
 - Slower than the instant reverse-alpha path — intended for when you need a perfectly clean result. The toggle is off by default; the app falls back to reverse-alpha if ffmpeg/onnxruntime are unavailable.
 
 > AI inpaint is verified via the **`update.bat` (source) run**, which installs onnxruntime/numpy/Pillow. The current `package.bat` portable build ships the standard reverse-alpha method only.

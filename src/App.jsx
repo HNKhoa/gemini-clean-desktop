@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AppBar, Toolbar, Typography, Box, Button, IconButton, Container, Paper, Stack,
   LinearProgress, Chip, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Divider, Switch, FormControlLabel,
+  TextField, Divider, Switch, FormControlLabel, Select, MenuItem, FormControl, InputLabel,
 } from '@mui/material';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import SettingsIcon from '@mui/icons-material/Settings';
@@ -92,6 +92,7 @@ export default function App() {
   const cancelRef = useRef(false);   // user pressed Stop
   const abortRef = useRef(null);     // AbortController for the current video job
   const [aiInpaint, setAiInpaint] = useState(false);
+  const [aiQuality, setAiQuality] = useState('standard');
   const [aiStatus, setAiStatus] = useState(null);
   const [aiAvailable, setAiAvailable] = useState(true);
   const aiRef = useRef(false);
@@ -100,7 +101,7 @@ export default function App() {
   aiAvailableRef.current = aiAvailable;
 
   useEffect(() => {
-    apiFetch('/api/settings').then((r) => r.json()).then((s) => { setOutputDir(s.output_dir || ''); setAiInpaint(s.ai_inpaint === '1'); }).catch(() => {});
+    apiFetch('/api/settings').then((r) => r.json()).then((s) => { setOutputDir(s.output_dir || ''); setAiInpaint(s.ai_inpaint === '1'); setAiQuality(s.ai_quality || 'standard'); }).catch(() => {});
     getAiStatus().then((s) => { setAiStatus(s); setAiAvailable(!!s.available); }).catch(() => {});
   }, []);
 
@@ -219,11 +220,13 @@ export default function App() {
     const fd = new FormData();
     fd.append('output_dir', draftDir);
     fd.append('ai_inpaint', aiInpaint ? '1' : '0');
+    fd.append('ai_quality', aiQuality);
     try {
       const r = await apiFetch('/api/settings', { method: 'POST', body: fd });
       const s = await r.json();
       setOutputDir(s.output_dir || draftDir);
       setAiInpaint(s.ai_inpaint === '1');
+      setAiQuality(s.ai_quality || 'standard');
     } catch (_) { /* ignore */ }
     setSettingsOpen(false);
   };
@@ -344,6 +347,15 @@ export default function App() {
                 {aiStatus.model_ready ? 'model ✓' : 'model sẽ tải'}</>
               )}
             </Typography>
+            <FormControl size="small" sx={{ mt: 1.5, minWidth: 260 }} disabled={!aiAvailable}>
+              <InputLabel id="aiq-label">Chất lượng video AI</InputLabel>
+              <Select labelId="aiq-label" label="Chất lượng video AI" value={aiQuality}
+                onChange={(e) => setAiQuality(e.target.value)}>
+                <MenuItem value="standard">Tiêu chuẩn (CRF 18) — nhanh, gọn</MenuItem>
+                <MenuItem value="high">Cao (CRF 16) — nét hơn, ~1.5×</MenuItem>
+                <MenuItem value="near_lossless">Gần lossless (CRF 12) — đẹp nhất, ~2–3×, chậm</MenuItem>
+              </Select>
+            </FormControl>
           </Box>
           <Divider sx={{ my: 2 }} />
           <Typography variant="caption" color="text.secondary">

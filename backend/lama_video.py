@@ -26,6 +26,15 @@ from PIL import Image, ImageFilter
 HERE = pathlib.Path(__file__).resolve().parent
 ALPHA_PATH = HERE / "lama_alpha96.f32"
 
+# Output quality presets (libx264 crf, preset). Lower CRF = higher quality + bigger
+# file. The source is already lossy, so "near_lossless" (CRF 12) is the practical
+# ceiling — CRF 0 only bloats the file preserving the source's own artifacts.
+QUALITY = {
+    "standard": (18, "medium"),
+    "high": (16, "slow"),
+    "near_lossless": (12, "slow"),
+}
+
 _session = None
 _alpha96 = None
 _session_lock = threading.Lock()
@@ -236,14 +245,14 @@ def _detect_box(frames_dir, files, W, H):
     return _locate(avg, W, H, _alpha())
 
 
-def _encode(frames_dir, fps, in_path, out_path):
-    # High-quality video re-encode (CRF 18 ≈ visually transparent). Resolution is
-    # preserved. Audio is COPIED untouched when possible (no re-encode = no audio
+def _encode(frames_dir, fps, in_path, out_path, crf=18, preset="medium"):
+    # Video re-encode at the chosen quality (lower CRF = higher quality). Resolution
+    # is preserved. Audio is COPIED untouched when possible (no re-encode = no audio
     # quality loss); only if the source audio can't be copied into MP4 do we fall
     # back to a high-bitrate AAC re-encode.
     base = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", f"{fps}",
             "-i", os.path.join(frames_dir, "%05d.png")]
-    venc = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium"]
+    venc = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(crf), "-preset", preset]
     if _has_audio(in_path):
         amap = ["-i", in_path, "-map", "0:v", "-map", "1:a", "-shortest"]
         try:
@@ -256,11 +265,13 @@ def _encode(frames_dir, fps, in_path, out_path):
         _run(base + venc + [out_path], "ffmpeg encode")
 
 
-def process_video(in_path, out_path, progress=None, should_cancel=None):
+def process_video(in_path, out_path, progress=None, should_cancel=None, quality="standard"):
     """Inpaint the watermark out of a video.
-    progress(done, total, stage); should_cancel() -> truthy aborts (raises Cancelled)."""
+    progress(done, total, stage); should_cancel() -> truthy aborts (raises Cancelled);
+    quality in QUALITY (standard | high | near_lossless)."""
     if not ffmpeg_available():
         raise RuntimeError("ffmpeg/ffprobe not found in PATH")
+    crf, preset = QUALITY.get(quality, QUALITY["standard"])
 
     def _ck():
         if should_cancel and should_cancel():
@@ -286,7 +297,7 @@ def process_video(in_path, out_path, progress=None, should_cancel=None):
                 _run(["ffmpeg", "-y", "-loglevel", "error", "-i", in_path, "-map", "0",
                       "-c", "copy", out_path], "ffmpeg remux")
             except Exception:
-                _encode(fin, fps, in_path, out_path)  # fallback re-encode
+                _encode(fin, fps, in_path, out_path, crf, preset)  # fallback re-encode
             if progress:
                 progress(total, total, "encode")
             return {"box": None, "frames": total, "provider": active_provider()}
@@ -332,7 +343,7 @@ def process_video(in_path, out_path, progress=None, should_cancel=None):
         _ck()
         if progress:
             progress(total, total, "encode")
-        _encode(fout, fps, in_path, out_path)
+        _encode(fout, fps, in_path, out_path, crf, preset)
         return {"box": box, "frames": total, "provider": active_provider()}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
