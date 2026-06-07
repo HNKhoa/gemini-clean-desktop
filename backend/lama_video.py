@@ -43,6 +43,21 @@ def _model_path() -> str:
     return str(pathlib.Path.home() / ".gemini-clean" / "models" / "inpainting_lama.onnx")
 
 
+def _build_session(model, providers):
+    so = ort.SessionOptions()
+    so.log_severity_level = 4  # quiet: we probe providers and handle failures ourselves
+    return ort.InferenceSession(model, sess_options=so, providers=providers)
+
+
+def _warmup(sess):
+    # One dummy inference validates the provider actually executes this model. LaMa's
+    # Fourier-conv ops fail on some GPU EPs (notably DirectML: "parameter is incorrect")
+    # only at run time, so creating the session is not enough — we must run it.
+    img = np.zeros((1, 3, 512, 512), np.float32)
+    mask = np.zeros((1, 1, 512, 512), np.float32)
+    sess.run(["output"], {"image": img, "mask": mask})
+
+
 def get_session():
     global _session
     if _session is None:
@@ -51,12 +66,26 @@ def get_session():
                 model = _model_path()
                 if not os.path.exists(model):
                     raise FileNotFoundError(f"LaMa model not found at {model}")
-                avail = ort.get_available_providers()
-                order = ["DmlExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
-                providers = [p for p in order if p in avail] or ["CPUExecutionProvider"]
-                so = ort.SessionOptions()
-                so.log_severity_level = 3
-                _session = ort.InferenceSession(model, sess_options=so, providers=providers)
+                avail = set(ort.get_available_providers())
+                # Prefer a GPU EP, but VALIDATE it with a warm-up run and fall back to
+                # CPU if it can't actually execute the model (DirectML reliably fails on
+                # LaMa's FFC MatMul). CPU always works (slower).
+                candidates = []
+                for p in ("CUDAExecutionProvider", "DmlExecutionProvider"):
+                    if p in avail:
+                        candidates.append([p, "CPUExecutionProvider"])
+                candidates.append(["CPUExecutionProvider"])
+                last_err = None
+                for provs in candidates:
+                    try:
+                        s = _build_session(model, provs)
+                        _warmup(s)
+                        _session = s
+                        break
+                    except Exception as e:  # provider can't run this model -> try next
+                        last_err = e
+                if _session is None:
+                    raise last_err or RuntimeError("no working ONNX Runtime provider for the model")
     return _session
 
 
