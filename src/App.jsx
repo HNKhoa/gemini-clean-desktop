@@ -17,7 +17,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import { classifyMediaFile, processImage, processVideo, saveToDisk } from './engine.js';
+import { apiFetch, classifyMediaFile, processImage, processVideo, saveToDisk } from './engine.js';
 
 const MAX_IMAGES = 20;
 const MAX_VIDEOS = 5;
@@ -93,7 +93,7 @@ export default function App() {
   const abortRef = useRef(null);     // AbortController for the current video job
 
   useEffect(() => {
-    fetch('/api/settings').then((r) => r.json()).then((s) => setOutputDir(s.output_dir || '')).catch(() => {});
+    apiFetch('/api/settings').then((r) => r.json()).then((s) => setOutputDir(s.output_dir || '')).catch(() => {});
   }, []);
 
   const updateJob = useCallback((id, patch) => {
@@ -190,12 +190,12 @@ export default function App() {
   }, []);
 
   const clearJobs = () => { if (!processing) { setJobs([]); setToast(''); } };
-  const openOutput = () => fetch('/api/open-output', { method: 'POST' }).catch(() => {});
+  const openOutput = () => apiFetch('/api/open-output', { method: 'POST' }).catch(() => {});
   const openFile = (job) => {
     if (!job.savedPath) return;
     const fd = new FormData();
     fd.append('path', job.savedPath);
-    fetch('/api/open-path', { method: 'POST', body: fd }).catch(() => {});
+    apiFetch('/api/open-path', { method: 'POST', body: fd }).catch(() => {});
   };
 
   const openSettings = () => { setDraftDir(outputDir); setSettingsOpen(true); };
@@ -203,7 +203,7 @@ export default function App() {
     const fd = new FormData();
     fd.append('output_dir', draftDir);
     try {
-      const r = await fetch('/api/settings', { method: 'POST', body: fd });
+      const r = await apiFetch('/api/settings', { method: 'POST', body: fd });
       const s = await r.json();
       setOutputDir(s.output_dir || draftDir);
     } catch (_) { /* ignore */ }

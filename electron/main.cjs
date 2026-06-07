@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, dialog } = require('electron');
 const path = require('path');
 const http = require('http');
 const net = require('net');
@@ -44,14 +44,36 @@ function startBackend() {
   }
 
   backendProc = spawn(cmd, args, {
-    stdio: 'inherit',
+    // Discard stdio in the packaged GUI app (no console attached); inherit for
+    // local/dev runs so logs show in the terminal. windowsHide stops a console
+    // window from flashing when launching the bundled backend exe.
+    stdio: app.isPackaged ? 'ignore' : 'inherit',
+    windowsHide: true,
     env: { ...process.env, GCD_DIST_DIR: distDir, GCD_PORT: String(PORT) },
   });
   backendProc.on('error', (err) => console.error('[electron] backend spawn error:', err));
+  backendProc.on('exit', () => { backendProc = null; });
+}
+
+// Reliably stop the backend. On Windows backendProc.kill() (SIGTERM) doesn't
+// terminate the child reliably — and the PyInstaller onefile exe spawns a child
+// bootloader process — so kill the whole tree with taskkill /T /F. Otherwise an
+// orphaned server keeps a port (and its /api write endpoint) alive after quit.
+function killBackend() {
+  const proc = backendProc;
+  backendProc = null;
+  if (!proc) return;
+  try {
+    if (process.platform === 'win32' && proc.pid) {
+      spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    } else {
+      proc.kill();
+    }
+  } catch (_) { /* ignore */ }
 }
 
 function waitForBackend(done, tries = 0) {
-  const req = http.get(`http://127.0.0.1:${PORT}/api/health`, (res) => {
+  const req = http.get(`http://127.0.0.1:${PORT}/api/health`, { headers: { 'X-GCD': '1' } }, (res) => {
     res.resume();
     done();
   });
@@ -95,7 +117,13 @@ app.whenReady().then(async () => {
     createWindow();
   } else {
     waitForBackend((err) => {
-      if (err) console.error('[electron]', err.message);
+      if (err) {
+        console.error('[electron]', err.message);
+        dialog.showErrorBox('Gemini Clean', 'Không khởi động được dịch vụ nền (backend). Vui lòng mở lại ứng dụng.');
+        killBackend();
+        app.quit();
+        return;
+      }
       createWindow();
     });
   }
@@ -105,10 +133,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (backendProc) { try { backendProc.kill(); } catch (_) {} }
+  killBackend();
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  if (backendProc) { try { backendProc.kill(); } catch (_) {} }
-});
+app.on('before-quit', killBackend);
+app.on('will-quit', killBackend);
+process.on('exit', killBackend);

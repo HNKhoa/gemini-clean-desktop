@@ -43,7 +43,7 @@ if errorlevel 1 ( echo. & echo [ERROR] Frontend build failed. & pause & exit /b 
 echo.
 echo [4/5] Bundling Python backend into gcd-backend.exe...
 if exist "backend\pybuild" rmdir /s /q "backend\pybuild"
-python -m PyInstaller --onefile --noconfirm --name gcd-backend --distpath backend\pybuild --workpath backend\pybuild\work --specpath backend\pybuild --collect-submodules uvicorn --collect-submodules fastapi --collect-submodules starlette --hidden-import h11 --hidden-import python_multipart --hidden-import multipart backend\server.py
+python -m PyInstaller --onefile --noconsole --noconfirm --name gcd-backend --distpath backend\pybuild --workpath backend\pybuild\work --specpath backend\pybuild --collect-submodules uvicorn --collect-submodules fastapi --collect-submodules starlette --hidden-import h11 --hidden-import python_multipart --hidden-import multipart --hidden-import anyio backend\server.py
 if errorlevel 1 ( echo. & echo [ERROR] PyInstaller failed. & pause & exit /b 1 )
 
 echo.

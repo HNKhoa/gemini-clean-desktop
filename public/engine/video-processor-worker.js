@@ -27,11 +27,16 @@ function interpolateAlphaMap(source, sourceSize, width, height) {
   return result;
 }
 
-function getAlphaMap(size) {
-  if (alphaCache.has(size)) return alphaCache.get(size);
+function getAlphaMap(width, height) {
+  // Build the alpha map at the actual region dimensions (width x height). The
+  // logo region is square today, but if a rectangular region is ever supplied a
+  // square map would mis-index rows (idx runs 0..width*height), leaving part of
+  // the logo unremoved. Keying the cache on "WxH" keeps that correct either way.
+  const key = width + 'x' + height;
+  if (alphaCache.has(key)) return alphaCache.get(key);
   let source = null;
   let sourceSize = 48;
-  if (size > 48) {
+  if (Math.max(width, height) > 48) {
     source = getEmbeddedAlphaMap(96);
     sourceSize = 96;
   } else {
@@ -39,8 +44,10 @@ function getAlphaMap(size) {
     sourceSize = 48;
   }
   if (!source) throw new Error('Alpha map unavailable.');
-  const result = sourceSize === size ? source : interpolateAlphaMap(source, sourceSize, size, size);
-  alphaCache.set(size, result);
+  const result = (sourceSize === width && sourceSize === height)
+    ? source
+    : interpolateAlphaMap(source, sourceSize, width, height);
+  alphaCache.set(key, result);
   return result;
 }
 
@@ -226,7 +233,7 @@ function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensi
 }
 
 function removeWatermarkFromData(data, width, height, intensity, outlineWidth, inpaintRadius) {
-  const alphaMap = getAlphaMap(width);
+  const alphaMap = getAlphaMap(width, height);
   const original = new Uint8ClampedArray(data);
   const logoValue = 255;
 

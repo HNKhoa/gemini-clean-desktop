@@ -17,12 +17,14 @@ import sys
 import time
 import sqlite3
 import pathlib
+import subprocess
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 # In a packaged build Electron passes GCD_DIST_DIR pointing at the bundled
@@ -38,12 +40,33 @@ DEFAULT_OUTPUT_DIR = str(HOME / "Downloads" / "GeminiClean")
 PORT = int(os.environ.get("GCD_PORT", "8000"))
 
 app = FastAPI(title="Gemini Clean Backend")
+# The renderer is served by this backend (same-origin) in production, so CORS is
+# not the primary control — the X-GCD guard below is. Scope origins to the dev
+# Vite server plus this backend's own port (derived from GCD_PORT) so a stale
+# fixed port can't silently diverge from the real one.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://127.0.0.1:8000"],
+    allow_origins=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def api_guard(request, call_next):
+    """CSRF / drive-by protection. Every /api/* request must carry `X-GCD: 1`.
+    A cross-origin web page can only send a custom header by triggering a CORS
+    preflight, which this backend's origin allow-list denies; a request without
+    the header is rejected here BEFORE any side effect (file write, settings
+    change, opening a folder). Same-origin renderer calls include the header and
+    pass through. Static assets (the SPA + /engine) are not under /api."""
+    if request.url.path.startswith("/api/") and request.method not in ("OPTIONS", "HEAD"):
+        if request.headers.get("x-gcd") != "1":
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -98,6 +121,28 @@ def output_dir() -> pathlib.Path:
     return p
 
 
+def validate_output_dir(raw: str) -> str:
+    """Reject paths that should never be a writable output target (UNC shares,
+    the Windows directory, the Startup autostart folder). Any other absolute
+    local path the user picks is allowed — this is a single-user desktop tool."""
+    raw = (raw or "").strip()
+    if not raw:
+        return DEFAULT_OUTPUT_DIR
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        raise ValueError("UNC paths are not allowed")
+    p = pathlib.Path(raw)
+    if not p.is_absolute():
+        raise ValueError("path must be absolute")
+    resolved = str(p.resolve())
+    low = resolved.lower()
+    windir = os.environ.get("WINDIR", r"C:\Windows").lower()
+    if low == windir or low.startswith(windir + "\\"):
+        raise ValueError("system directory is not allowed")
+    if "\\start menu\\programs\\startup" in low or "/.config/autostart" in low:
+        raise ValueError("startup directory is not allowed")
+    return resolved
+
+
 def safe_name(name: str) -> str:
     name = os.path.basename(name or "")
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(". ")
@@ -130,24 +175,38 @@ def settings_get():
 
 @app.post("/api/settings")
 def settings_set(output_dir: str = Form(...)):
-    set_setting("output_dir", output_dir.strip() or DEFAULT_OUTPUT_DIR)
+    try:
+        validated = validate_output_dir(output_dir)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    set_setting("output_dir", validated)
     return {"ok": True, "output_dir": get_setting("output_dir")}
 
 
 @app.post("/api/save")
 async def save(file: UploadFile = File(...), name: str = Form(...), kind: str = Form("image")):
-    folder = output_dir()
-    target = unique_path(folder, safe_name(name))
     data = await file.read()
-    with open(target, "wb") as f:
-        f.write(data)
-    conn = db()
-    conn.execute(
-        "INSERT INTO history (name, path, kind, size, created_at) VALUES (?, ?, ?, ?, ?)",
-        (target.name, str(target), kind, len(data), int(time.time())),
-    )
-    conn.commit()
-    conn.close()
+
+    def _persist():
+        folder = output_dir()
+        target = unique_path(folder, safe_name(name))
+        with open(target, "wb") as f:
+            f.write(data)
+        conn = db()
+        conn.execute(
+            "INSERT INTO history (name, path, kind, size, created_at) VALUES (?, ?, ?, ?, ?)",
+            (target.name, str(target), kind, len(data), int(time.time())),
+        )
+        conn.commit()
+        conn.close()
+        return target
+
+    try:
+        # Run the blocking disk write + SQLite insert off the event loop so a large
+        # save doesn't stall other requests on the single-worker server.
+        target = await run_in_threadpool(_persist)
+    except Exception:  # pragma: no cover
+        return JSONResponse({"ok": False, "error": "could not save file"}, status_code=500)
     return {"ok": True, "path": str(target), "name": target.name, "size": len(data)}
 
 
@@ -166,9 +225,9 @@ def open_output():
         if sys.platform.startswith("win"):
             os.startfile(str(folder))  # noqa: S606
         elif sys.platform == "darwin":
-            os.system(f'open "{folder}"')
+            subprocess.run(["open", str(folder)], check=False)
         else:
-            os.system(f'xdg-open "{folder}"')
+            subprocess.run(["xdg-open", str(folder)], check=False)
         return {"ok": True, "path": str(folder)}
     except Exception as e:  # pragma: no cover
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -187,9 +246,9 @@ def open_path(path: str = Form(...)):
         if sys.platform.startswith("win"):
             os.startfile(str(p))  # noqa: S606
         elif sys.platform == "darwin":
-            os.system(f'open "{p}"')
+            subprocess.run(["open", str(p)], check=False)
         else:
-            os.system(f'xdg-open "{p}"')
+            subprocess.run(["xdg-open", str(p)], check=False)
         return {"ok": True}
     except Exception as e:  # pragma: no cover
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)

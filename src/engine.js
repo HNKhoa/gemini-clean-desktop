@@ -279,12 +279,22 @@ export async function processVideo(file, onProgress, signal, maxOutputDimension 
   };
 }
 
+// Every /api/* call must carry this header. The backend rejects /api requests
+// without it, which blocks cross-site (CSRF) calls from any web page: a
+// cross-origin request that carries a custom header forces a CORS preflight the
+// backend denies, and one without the header is refused before any side effect.
+// Same-origin renderer calls pass through.
+export const API_HEADER = { 'X-GCD': '1' };
+export function apiFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: { ...(options.headers || {}), ...API_HEADER } });
+}
+
 export async function saveToDisk(blob, name, kind) {
   const fd = new FormData();
   fd.append('file', blob, name);
   fd.append('name', name);
   fd.append('kind', kind);
-  const res = await fetch('/api/save', { method: 'POST', body: fd });
+  const res = await apiFetch('/api/save', { method: 'POST', body: fd });
   if (!res.ok) throw new Error('save failed: HTTP ' + res.status);
   return res.json();
 }

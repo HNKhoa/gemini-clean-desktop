@@ -13,7 +13,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "electron .",
-    "package": "electron-builder --win portable"
+    "package": "vite build && electron-builder --win portable"
   },
   "devDependencies": {
     "@emotion/react": "^11.11.4",

@@ -278,8 +278,6 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
     let wmInnerH = box.h;
     let pendingFrames = 0;
     let frameOrder = [];
-    let chunkCount = 0;
-    let decodeFinishedCount = 0;
     let isExtractionFinished = false;
     let workerIdx = 0;
     let unsupportedAudioWarning = '';
@@ -335,13 +333,11 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
         await videoEncoder.flush();
         muxer.finalize();
         const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
-        const previewUrl = URL.createObjectURL(blob);
         cleanup();
         resolve({
           blob,
           filename: `clean_${cleanBaseName(file.name)}.mp4`,
           mimeType: 'video/mp4',
-          previewUrl,
           width: outputWidth,
           height: outputHeight,
           meta: {
@@ -416,8 +412,13 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
       const fitted = (maxOutputDimension > 0 && workload > DOWNSCALE_WORKLOAD)
         ? fitWithin(srcWidth, srcHeight, maxOutputDimension)
         : { width: srcWidth, height: srcHeight };
-      outputWidth = fitted.width;
-      outputHeight = fitted.height;
+      // Force even dimensions (H.264 / yuv420 requires them). fitWithin already
+      // returns even sizes when downscaling; this also handles odd-sized sources on
+      // the keep-original path — an odd source becomes a 1px "downscale" via the
+      // scaleCanvas below, so the encoded frame size always matches the encoder
+      // config (an odd size otherwise surfaces as "Encoder creation error").
+      outputWidth = fitted.width - (fitted.width % 2);
+      outputHeight = fitted.height - (fitted.height % 2);
       const downscaling = outputWidth !== srcWidth || outputHeight !== srcHeight;
       console.log('[gwr-video] workload(GP-frames)=', (workload / 1e9).toFixed(2), 'downscaling=', downscaling);
 
@@ -587,15 +588,34 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
           frame.close?.();
           return;
         }
-        decodeFinishedCount += 1;
         const id = frameCount++;
         const timestamp = frame.timestamp;
         const duration = frame.duration ?? undefined;
         pendingFrames += 1;
 
+        // Reserve this frame's ordering slot SYNCHRONOUSLY (before any await) so
+        // frameOrder always stays in decode/presentation order. The createImageBitmap
+        // calls below are async and can resolve out of dispatch order; pushing only
+        // after awaiting would let frames enter the encoder with non-monotonic
+        // timestamps (stutter / broken keyframe cadence / muxer offset errors). The
+        // drain loop encodes a slot only once `done` is set, by which point its
+        // bitmap fields are populated. cleanup() closes originalFrameBitmap on every
+        // path, so the worker bitmap is the only thing the catch must close itself.
+        const record = {
+          id,
+          timestamp,
+          duration,
+          done: false,
+          originalFrameBitmap: null,
+          processedBox: null,
+          x: box.x,
+          y: box.y
+        };
+        frameOrder.push(record);
+
         let bitmapWorker = null;
         try {
-          const bitmapMain = await createImageBitmap(frame);
+          record.originalFrameBitmap = await createImageBitmap(frame);
           try {
             bitmapWorker = await createImageBitmap(frame, box.x, box.y, box.w, box.h);
           } catch (_) {
@@ -603,17 +623,6 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
             // Fallback still works, but it sends a full-frame bitmap to the worker.
             bitmapWorker = await createImageBitmap(frame);
           }
-
-          frameOrder.push({
-            id,
-            timestamp,
-            duration,
-            done: false,
-            originalFrameBitmap: bitmapMain,
-            processedBox: null,
-            x: box.x,
-            y: box.y
-          });
           frame.close();
 
           workers[workerIdx].postMessage({
@@ -638,7 +647,6 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
           bitmapWorker?.close?.();
           frame.close?.();
           pendingFrames--;
-          pumpDecodeQueue();
           fail(error);
         }
       },
@@ -662,7 +670,6 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
       },
       (chunk) => {
         if (aborted || signal?.aborted) return;
-        chunkCount += 1;
         decodeQueue.push(chunk);
         pumpDecodeQueue();
       },
