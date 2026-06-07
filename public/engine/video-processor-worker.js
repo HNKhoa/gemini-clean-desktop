@@ -209,10 +209,87 @@ function softenCrop(data, width, height, cx, cy, wmRadius) {
   }
 }
 
+// Separable box blur of a single-channel float mask (used to feather the
+// logo-footprint coverage so the confined soften fades smoothly into the margin).
+function blurMaskFloat(src, w, h, r) {
+  const tmp = new Float32Array(w * h);
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
+    let s = 0, c = 0;
+    for (let dx = -r; dx <= r; dx += 1) { const xx = x + dx; if (xx < 0 || xx >= w) continue; s += src[y * w + xx]; c += 1; }
+    tmp[y * w + x] = s / c;
+  }
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
+    let s = 0, c = 0;
+    for (let dy = -r; dy <= r; dy += 1) { const yy = y + dy; if (yy < 0 || yy >= h) continue; s += tmp[yy * w + x]; c += 1; }
+    out[y * w + x] = s / c;
+  }
+  return out;
+}
+
+// Alpha-guided soften: blur ONLY the logo footprint (+ a small feathered halo),
+// leaving the surrounding background untouched. On structured backgrounds (grids,
+// geometric art) this keeps the lines outside the logo perfectly sharp, instead of
+// the radial disk that wipes a large area.
+function softenCropAlphaGuided(data, cropW, cropH, innerX, innerY, innerW, innerH) {
+  const wmRadius = Math.max(innerW, innerH) / 2;
+  const blurRadius = Math.max(2, Math.round(wmRadius / 1.3));
+  const halo = Math.max(3, Math.round(wmRadius * 0.7));
+  const blurred = boxBlurRGBA(data, cropW, cropH, blurRadius);
+  const innerAlpha = getAlphaMap(innerW, innerH);
+  const pres = new Float32Array(cropW * cropH);
+  for (let iy = 0; iy < innerH; iy += 1) {
+    for (let ix = 0; ix < innerW; ix += 1) {
+      if ((innerAlpha[iy * innerW + ix] || 0) > 0.02) pres[(innerY + iy) * cropW + (innerX + ix)] = 1;
+    }
+  }
+  const fea = blurMaskFloat(pres, cropW, cropH, halo);
+  for (let i = 0; i < cropW * cropH; i += 1) {
+    const m = Math.max(0, Math.min(1, fea[i] * 1.85));
+    if (m <= 0.002) continue;
+    const off = i * 4;
+    data[off] = clamp(data[off] * (1 - m) + blurred[off] * m);
+    data[off + 1] = clamp(data[off + 1] * (1 - m) + blurred[off + 1] * m);
+    data[off + 2] = clamp(data[off + 2] * (1 - m) + blurred[off + 2] * m);
+  }
+}
+
+// Is the background around the logo "structured" (sharp lines/edges) rather than
+// smooth? Measured as the fraction of border pixels (outside the logo area) with a
+// strong local luminance gradient. Grids/blueprints score ~0.15; smooth or softly
+// gradient backgrounds score ~0. Threshold 0.04 separates them with wide margin.
+function backgroundIsStructured(data, cw, ch, icx, icy, wmR) {
+  const lum = (o) => 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
+  const rIgnore2 = (wmR * 1.35) * (wmR * 1.35);
+  let edges = 0, n = 0;
+  for (let y = 1; y < ch - 1; y += 1) {
+    for (let x = 1; x < cw - 1; x += 1) {
+      const dx0 = x - icx, dy0 = y - icy;
+      if (dx0 * dx0 + dy0 * dy0 <= rIgnore2) continue;
+      const o = (y * cw + x) * 4;
+      const gx = Math.abs(lum(o + 4) - lum(o - 4));
+      const gy = Math.abs(lum(o + cw * 4) - lum(o - cw * 4));
+      if (gx + gy > 18) edges += 1;
+      n += 1;
+    }
+  }
+  return n > 0 && edges / n > 0.04;
+}
+
 // Process one expanded crop: reverse-alpha + outline repair on the inner
 // (aligned) logo region, then a radial blur that dissolves the logo and feathers
 // into the margin (eliminates the residual outline/tips on smooth backgrounds).
 function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensity, outlineWidth, inpaintRadius) {
+  const wmRadius = Math.max(innerW, innerH) / 2;
+  const cx = innerX + innerW / 2;
+  const cy = innerY + innerH / 2;
+  // Adapt to the background. Smooth backgrounds keep the original radial soften (it
+  // is invisible there and dissolves any outline well). Structured backgrounds get
+  // a slightly gentler reverse-alpha (less dark ghost on bright logos) and a soften
+  // confined to the logo footprint, so the surrounding lines stay sharp.
+  const structured = backgroundIsStructured(data, cropW, cropH, cx, cy, wmRadius);
+  const useIntensity = structured ? intensity * 0.8 : intensity;
+
   const inner = new Uint8ClampedArray(innerW * innerH * 4);
   for (let iy = 0; iy < innerH; iy += 1) {
     for (let ix = 0; ix < innerW; ix += 1) {
@@ -221,7 +298,7 @@ function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensi
       inner[dst] = data[s]; inner[dst + 1] = data[s + 1]; inner[dst + 2] = data[s + 2]; inner[dst + 3] = data[s + 3];
     }
   }
-  removeWatermarkFromData(inner, innerW, innerH, intensity, outlineWidth, inpaintRadius);
+  removeWatermarkFromData(inner, innerW, innerH, useIntensity, outlineWidth, inpaintRadius);
   for (let iy = 0; iy < innerH; iy += 1) {
     for (let ix = 0; ix < innerW; ix += 1) {
       const dst = ((innerY + iy) * cropW + (innerX + ix)) * 4;
@@ -229,7 +306,12 @@ function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensi
       data[dst] = inner[s]; data[dst + 1] = inner[s + 1]; data[dst + 2] = inner[s + 2];
     }
   }
-  softenCrop(data, cropW, cropH, innerX + innerW / 2, innerY + innerH / 2, Math.max(innerW, innerH) / 2);
+
+  if (structured) {
+    softenCropAlphaGuided(data, cropW, cropH, innerX, innerY, innerW, innerH);
+  } else {
+    softenCrop(data, cropW, cropH, cx, cy, wmRadius);
+  }
 }
 
 function removeWatermarkFromData(data, width, height, intensity, outlineWidth, inpaintRadius) {
