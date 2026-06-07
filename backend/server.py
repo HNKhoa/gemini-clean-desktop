@@ -18,6 +18,12 @@ import time
 import sqlite3
 import pathlib
 import subprocess
+import shutil
+import uuid
+import hashlib
+import threading
+import importlib.util
+import urllib.request
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form
@@ -38,6 +44,20 @@ DB_PATH = DATA_DIR / "app.db"
 
 DEFAULT_OUTPUT_DIR = str(HOME / "Downloads" / "GeminiClean")
 PORT = int(os.environ.get("GCD_PORT", "8000"))
+
+# Optional AI inpaint (LaMa). Model is downloaded once to the data dir, then offline.
+MODELS_DIR = DATA_DIR / "models"
+LAMA_PATH = MODELS_DIR / "inpainting_lama.onnx"
+ALPHA_FILE = pathlib.Path(__file__).resolve().parent / "lama_alpha96.f32"
+os.environ.setdefault("GCD_LAMA_MODEL", str(LAMA_PATH))
+# Pin an immutable revision + SHA-256 so a corrupt or substituted (MITM) download
+# can never be loaded as an executable ONNX graph.
+LAMA_REV = "aee6d22f0a13e5e35af1c9a1c3afd62841fc6f3f"
+LAMA_URL = f"https://huggingface.co/opencv/inpainting_lama/resolve/{LAMA_REV}/inpainting_lama_2025jan.onnx"
+LAMA_SIZE = 92591623  # bytes (Apache-2.0, opencv/inpainting_lama)
+LAMA_SHA256 = "7df918ac3921d3daf0aae1d219776cf0dc4e4935f035af81841b40adcf74fdf2"
+ai_jobs = {}  # job_id -> progress dict (in-memory; single-user desktop)
+_ai_sema = threading.Semaphore(1)  # at most one heavy AI job runs at a time
 
 app = FastAPI(title="Gemini Clean Backend")
 # The renderer is served by this backend (same-origin) in production, so CORS is
@@ -170,17 +190,22 @@ def health():
 
 @app.get("/api/settings")
 def settings_get():
-    return {"output_dir": get_setting("output_dir", DEFAULT_OUTPUT_DIR)}
+    return {
+        "output_dir": get_setting("output_dir", DEFAULT_OUTPUT_DIR),
+        "ai_inpaint": get_setting("ai_inpaint", "0"),
+    }
 
 
 @app.post("/api/settings")
-def settings_set(output_dir: str = Form(...)):
+def settings_set(output_dir: str = Form(...), ai_inpaint: str = Form(None)):
     try:
         validated = validate_output_dir(output_dir)
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     set_setting("output_dir", validated)
-    return {"ok": True, "output_dir": get_setting("output_dir")}
+    if ai_inpaint is not None:
+        set_setting("ai_inpaint", "1" if str(ai_inpaint) in ("1", "true", "on", "yes") else "0")
+    return {"ok": True, "output_dir": get_setting("output_dir"), "ai_inpaint": get_setting("ai_inpaint", "0")}
 
 
 @app.post("/api/save")
@@ -252,6 +277,169 @@ def open_path(path: str = Form(...)):
         return {"ok": True}
     except Exception as e:  # pragma: no cover
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+# ── AI inpaint (LaMa) — optional high-quality video watermark removal ─────────
+def _model_ready() -> bool:
+    try:
+        return LAMA_PATH.exists() and abs(LAMA_PATH.stat().st_size - LAMA_SIZE) < (1 << 20)
+    except Exception:
+        return False
+
+
+def _download_model(job=None):
+    if _model_ready():
+        return
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = str(LAMA_PATH) + ".part"
+    try:
+        req = urllib.request.Request(LAMA_URL, headers={"User-Agent": "gemini-clean"})
+        h = hashlib.sha256()
+        with urllib.request.urlopen(req, timeout=60) as r:
+            total = int(r.headers.get("Content-Length", LAMA_SIZE) or LAMA_SIZE)
+            done = 0
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+                    done += len(chunk)
+                    if job is not None:
+                        job["stage"] = "download"
+                        job["progress"] = round(done / total, 4)
+        digest = h.hexdigest()
+        if digest != LAMA_SHA256:
+            raise RuntimeError(f"model checksum mismatch (got {digest[:12]}…)")
+        os.replace(tmp, str(LAMA_PATH))
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _ai_available():
+    """The AI feature can actually run only if onnxruntime + the lama_video module +
+    the alpha template + ffmpeg are all present (e.g. NOT in the portable build)."""
+    try:
+        ort_ok = importlib.util.find_spec("onnxruntime") is not None
+    except Exception:
+        ort_ok = False
+    try:
+        lama_ok = importlib.util.find_spec("lama_video") is not None
+    except Exception:
+        lama_ok = False
+    ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    return ort_ok and lama_ok and ffmpeg_ok and ALPHA_FILE.exists()
+
+
+@app.get("/api/ai-status")
+def ai_status():
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+    except Exception:
+        providers = []
+    return {
+        "available": _ai_available(),
+        "model_ready": _model_ready(),
+        "ffmpeg": bool(shutil.which("ffmpeg") and shutil.which("ffprobe")),
+        "providers": providers,
+        "enabled": get_setting("ai_inpaint", "0") == "1",
+    }
+
+
+def _run_ai_job(job_id, in_path, orig_name, job_dir):
+    job = ai_jobs[job_id]
+    out_tmp = os.path.join(job_dir, "out.mp4")
+    acquired = False
+    try:
+        _ai_sema.acquire()  # serialize heavy jobs (one GPU/CPU run at a time)
+        acquired = True
+        if job.get("cancel"):
+            raise RuntimeError("cancelled")
+        job["status"] = "downloading"
+        _download_model(job)
+        job["status"] = "processing"
+        job["stage"] = "inpaint"
+        job["progress"] = 0
+        import lama_video
+
+        def prog(d, t, stage):
+            job["frame"] = d
+            job["total"] = t
+            job["stage"] = stage
+            job["progress"] = round(d / t, 4) if t else 0
+
+        info = lama_video.process_video(in_path, out_tmp, progress=prog,
+                                        should_cancel=lambda: bool(job.get("cancel")))
+        if job.get("cancel"):
+            raise RuntimeError("cancelled")
+        folder = output_dir()
+        base = safe_name(os.path.splitext(orig_name)[0]) or "video"
+        target = unique_path(folder, f"clean_{base}.mp4")
+        os.replace(out_tmp, str(target))
+        size = target.stat().st_size
+        conn = db()
+        conn.execute(
+            "INSERT INTO history (name, path, kind, size, created_at) VALUES (?, ?, ?, ?, ?)",
+            (target.name, str(target), "video", size, int(time.time())),
+        )
+        conn.commit()
+        conn.close()
+        job.update({"status": "done", "progress": 1, "path": str(target),
+                    "name": target.name, "provider": info.get("provider"), "box": info.get("box")})
+    except Exception as e:  # pragma: no cover
+        # A user cancel (flag or lama_video.Cancelled) is reported as 'cancelled',
+        # NOT 'error', and no output / history row is produced.
+        if job.get("cancel") or e.__class__.__name__ == "Cancelled":
+            job.update({"status": "cancelled", "error": "cancelled"})
+        else:
+            job.update({"status": "error", "error": str(e)})
+    finally:
+        if acquired:
+            _ai_sema.release()
+        shutil.rmtree(job_dir, ignore_errors=True)  # removes upload + any partial out
+        threading.Timer(180, lambda: ai_jobs.pop(job_id, None)).start()  # evict terminal job
+
+
+@app.post("/api/process-video-ai")
+async def process_video_ai(file: UploadFile = File(...), name: str = Form(...)):
+    job_id = uuid.uuid4().hex
+    job_dir = DATA_DIR / "tmp" / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    in_path = str(job_dir / safe_name(name))
+
+    def _persist():
+        # Stream the upload to disk off the event loop (avoids buffering a whole
+        # video in RAM and stalling the single-worker server).
+        with open(in_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+    await run_in_threadpool(_persist)
+    ai_jobs[job_id] = {"status": "queued", "progress": 0, "frame": 0, "total": 0, "cancel": False}
+    threading.Thread(target=_run_ai_job, args=(job_id, in_path, name, str(job_dir)), daemon=True).start()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/ai-job/{job_id}")
+def ai_job(job_id: str):
+    job = ai_jobs.get(job_id)
+    if not job:
+        return JSONResponse({"ok": False, "error": "unknown job"}, status_code=404)
+    return {"ok": True, **job}
+
+
+@app.post("/api/ai-cancel/{job_id}")
+def ai_cancel(job_id: str):
+    job = ai_jobs.get(job_id)
+    if not job:
+        return JSONResponse({"ok": False, "error": "unknown job"}, status_code=404)
+    job["cancel"] = True  # the worker checks this per frame and stops cleanly
+    return {"ok": True}
 
 
 # ── Static (production): serve the built React app + /engine. Mount LAST so the

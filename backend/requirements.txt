@@ -2,3 +2,5 @@ fastapi>=0.111.0
 uvicorn>=0.30.0
 h11>=0.14.0
 python-multipart>=0.0.9
+# Optional "AI inpaint" deps live in requirements-ai.txt (installed non-fatally by
+# update.bat) so a missing/incompatible wheel never blocks the core app from launching.

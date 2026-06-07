@@ -357,6 +357,41 @@ export function apiFetch(url, options = {}) {
   return fetch(url, { ...options, headers: { ...(options.headers || {}), ...API_HEADER } });
 }
 
+// AI (LaMa) video path: the backend does the heavy work (decode → inpaint → encode)
+// and saves the result itself, so this uploads the original, polls progress, and
+// returns the saved path. Much cleaner on patterned/coloured backgrounds, but slow.
+export async function processVideoAI(file, onProgress, signal) {
+  onProgress(0.02, 'Tải lên…');
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  fd.append('name', file.name);
+  const res = await apiFetch('/api/process-video-ai', { method: 'POST', body: fd });
+  if (!res.ok) throw new Error('AI start failed: HTTP ' + res.status);
+  const { job_id } = await res.json();
+  if (!job_id) throw new Error('AI job not created');
+  // Tell the backend to stop too (it runs in a worker thread) — otherwise "Stop"
+  // would only end the UI wait while the backend kept churning and saved a file.
+  const cancelJob = () => apiFetch('/api/ai-cancel/' + job_id, { method: 'POST' }).catch(() => {});
+  for (;;) {
+    if (signal?.aborted) { cancelJob(); throw new Error('Cancelled'); }
+    await new Promise((r) => setTimeout(r, 1000));
+    if (signal?.aborted) { cancelJob(); throw new Error('Cancelled'); }
+    const jr = await apiFetch('/api/ai-job/' + job_id);
+    if (!jr.ok) throw new Error('AI job lost');
+    const j = await jr.json();
+    const stage = j.stage === 'download' ? 'Tải model AI' : j.stage === 'encode' ? 'Xuất video' : 'AI xử lý';
+    const info = j.total ? `${stage} ${j.frame || 0}/${j.total}` : stage + '…';
+    onProgress(Math.max(0.02, Math.min(0.98, j.progress || 0.02)), info);
+    if (j.status === 'done') return { path: j.path, name: j.name, kind: 'video', applied: true };
+    if (j.status === 'cancelled') throw new Error('Cancelled');
+    if (j.status === 'error') throw new Error(j.error || 'AI thất bại');
+  }
+}
+
+export function getAiStatus() {
+  return apiFetch('/api/ai-status').then((r) => r.json()).catch(() => ({}));
+}
+
 export async function saveToDisk(blob, name, kind) {
   const fd = new FormData();
   fd.append('file', blob, name);

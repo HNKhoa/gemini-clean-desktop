@@ -12,19 +12,23 @@ This is the desktop port of the "Gemini Clean Downloader" extension. The downloa
 
 ```
 electron/main.cjs   → window + spawns backend (prod) + loads the UI
-backend/server.py   → FastAPI: /api/save, /api/settings, /api/history, /api/open-output (+ serves dist/ in prod)
+backend/server.py   → FastAPI: /api/save, /api/settings, /api/history, /api/open-output,
+                       /api/process-video-ai + /api/ai-job + /api/ai-status (AI inpaint), serves dist/ in prod
+backend/lama_video.py → AI inpaint pipeline (ffmpeg decode → LaMa ONNX per frame → encode)
 src/                → React + MUI app  (App.jsx, engine.js wrapper, theme.js)
 public/engine/      → reused watermark engine (gwr + mp4box/mp4-muxer + workers)
 ```
 
 ## Prerequisites
 - Node.js 18+ and npm
-- Python 3.9+
+- Python 3.9+ for the core app (**Python 3.10+** for the optional **AI inpaint** mode — onnxruntime has no 3.9 wheel)
+- **ffmpeg** on PATH — only needed for the optional **AI inpaint** video mode
 
 ## Setup
 ```bash
 npm install
 pip install -r backend/requirements.txt
+pip install -r backend/requirements-ai.txt   # optional: AI inpaint (Python 3.10+, needs ffmpeg)
 ```
 
 ## Run (development)
@@ -42,11 +46,21 @@ npm start            # Electron launches: spawns backend (serves dist/ + /api) a
 To package as a single distributable later, add `electron-builder` and bundle the Python backend with PyInstaller as a sidecar (see "Packaging" notes below).
 
 ## How it works
-The Gemini watermark is a translucent logo composited at a known position. The engine inverts the blend (`original = (watermarked − α·255)/(1−α)`) using embedded alpha maps and inpaints the outline. Videos are cleaned frame-by-frame with WebCodecs.
+The Gemini watermark is a translucent logo composited at a known position. The engine inverts the blend (`original = (watermarked − α·C)/(1−α)`) using embedded alpha maps, with the position auto-detected (NCC) and the removal strength **calibrated per video**, then inpaints the residual outline. Videos are cleaned frame-by-frame with WebCodecs.
+
+## AI inpaint (optional — highest quality on patterned/coloured backgrounds)
+Reverse-alpha removes the logo but can leave a faint trace on sharp/structured backgrounds (grids, textures). Enable **Settings → “AI inpaint cho video”** to instead **reconstruct** the background under the logo with a **LaMa** inpainting model — this fully removes the mark and rebuilds grid lines / textures of any colour.
+
+- Runs in the **Python backend** (onnxruntime + ffmpeg), frame by frame, then re-encodes with the original audio.
+- The model (~88 MB, Apache-2.0 `opencv/inpainting_lama`) is **downloaded once** to `%USERPROFILE%\.gemini-clean\models\` on first use, then works offline.
+- **GPU**: on Windows `onnxruntime-directml` uses your GPU automatically (CPU fallback is much slower).
+- Slower than the instant reverse-alpha path — intended for when you need a perfectly clean result. The toggle is off by default; the app falls back to reverse-alpha if ffmpeg/onnxruntime are unavailable.
+
+> AI inpaint is verified via the **`update.bat` (source) run**, which installs onnxruntime/numpy/Pillow. The current `package.bat` portable build ships the standard reverse-alpha method only.
 
 ## Notes & limitations
 - Removes the **visible** watermark only — invisible provenance marks (e.g. **SynthID**) remain.
-- Reconstruction under the logo is approximate; busy backgrounds may show slight artifacts.
+- The default (reverse-alpha) reconstruction under the logo is approximate; busy/patterned backgrounds may show a slight trace — enable **AI inpaint** (above) for a fully clean result.
 - Video processing needs a Chromium-based webview with WebCodecs (Electron provides this).
 - The newer Gemini 2816×1536 `20260520` watermark variant is not specially handled (offline engine); standard sizes work.
 

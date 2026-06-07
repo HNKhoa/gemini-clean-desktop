@@ -33,13 +33,28 @@
   "build": {
     "appId": "com.geminiclean.app",
     "productName": "Gemini Clean",
-    "directories": { "output": "release" },
-    "files": ["electron/**/*", "package.json"],
-    "extraResources": [
-      { "from": "dist", "to": "app-dist" },
-      { "from": "backend/pybuild/gcd-backend.exe", "to": "gcd-backend.exe" }
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
     ],
-    "win": { "target": "portable" },
-    "portable": { "artifactName": "GeminiClean-${version}-portable.exe" }
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "app-dist"
+      },
+      {
+        "from": "backend/pybuild/gcd-backend.exe",
+        "to": "gcd-backend.exe"
+      }
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "GeminiClean-${version}-portable.exe"
+    }
   }
 }

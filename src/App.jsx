@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AppBar, Toolbar, Typography, Box, Button, IconButton, Container, Paper, Stack,
   LinearProgress, Chip, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Divider,
+  TextField, Divider, Switch, FormControlLabel,
 } from '@mui/material';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import SettingsIcon from '@mui/icons-material/Settings';
@@ -17,7 +17,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import { apiFetch, classifyMediaFile, processImage, processVideo, saveToDisk } from './engine.js';
+import { apiFetch, classifyMediaFile, processImage, processVideo, processVideoAI, getAiStatus, saveToDisk } from './engine.js';
 
 const MAX_IMAGES = 20;
 const MAX_VIDEOS = 5;
@@ -91,9 +91,17 @@ export default function App() {
   jobsRef.current = jobs;
   const cancelRef = useRef(false);   // user pressed Stop
   const abortRef = useRef(null);     // AbortController for the current video job
+  const [aiInpaint, setAiInpaint] = useState(false);
+  const [aiStatus, setAiStatus] = useState(null);
+  const [aiAvailable, setAiAvailable] = useState(true);
+  const aiRef = useRef(false);
+  aiRef.current = aiInpaint;
+  const aiAvailableRef = useRef(true);
+  aiAvailableRef.current = aiAvailable;
 
   useEffect(() => {
-    apiFetch('/api/settings').then((r) => r.json()).then((s) => setOutputDir(s.output_dir || '')).catch(() => {});
+    apiFetch('/api/settings').then((r) => r.json()).then((s) => { setOutputDir(s.output_dir || ''); setAiInpaint(s.ai_inpaint === '1'); }).catch(() => {});
+    getAiStatus().then((s) => { setAiStatus(s); setAiAvailable(!!s.available); }).catch(() => {});
   }, []);
 
   const updateJob = useCallback((id, patch) => {
@@ -129,6 +137,14 @@ export default function App() {
   const processOneJob = useCallback(async (j) => {
     try {
       updateJob(j.id, { status: 'processing', progress: j.kind === 'video' ? 0.02 : 0.1, info: '', savedPath: '' });
+      if (j.kind === 'video' && aiRef.current && aiAvailableRef.current) {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const aout = await processVideoAI(j.file, (p, info) => updateJob(j.id, { progress: p, info }), controller.signal);
+        abortRef.current = null;
+        updateJob(j.id, { status: 'done', progress: 1, savedPath: aout.path, info: 'Đã gỡ watermark (AI)' });
+        return;
+      }
       let out;
       if (j.kind === 'video') {
         const controller = new AbortController();
@@ -198,14 +214,16 @@ export default function App() {
     apiFetch('/api/open-path', { method: 'POST', body: fd }).catch(() => {});
   };
 
-  const openSettings = () => { setDraftDir(outputDir); setSettingsOpen(true); };
+  const openSettings = () => { setDraftDir(outputDir); setSettingsOpen(true); getAiStatus().then((s) => { setAiStatus(s); setAiAvailable(!!s.available); }); };
   const saveSettings = async () => {
     const fd = new FormData();
     fd.append('output_dir', draftDir);
+    fd.append('ai_inpaint', aiInpaint ? '1' : '0');
     try {
       const r = await apiFetch('/api/settings', { method: 'POST', body: fd });
       const s = await r.json();
       setOutputDir(s.output_dir || draftDir);
+      setAiInpaint(s.ai_inpaint === '1');
     } catch (_) { /* ignore */ }
     setSettingsOpen(false);
   };
@@ -224,7 +242,7 @@ export default function App() {
             <IconButton onClick={openOutput} size="small"><FolderOpenIcon /></IconButton>
           </Tooltip>
           <Tooltip title="Cài đặt">
-            <IconButton onClick={openSettings} size="small"><SettingsIcon /></IconButton>
+            <span><IconButton onClick={openSettings} size="small" disabled={processing}><SettingsIcon /></IconButton></span>
           </Tooltip>
         </Toolbar>
       </AppBar>
@@ -311,6 +329,22 @@ export default function App() {
             onChange={(e) => setDraftDir(e.target.value)}
             placeholder="C:\\Users\\…\\Downloads\\GeminiClean"
           />
+          <Box sx={{ mt: 2 }}>
+            <FormControlLabel
+              control={<Switch checked={aiInpaint && aiAvailable} disabled={!aiAvailable} onChange={(e) => setAiInpaint(e.target.checked)} />}
+              label="AI inpaint cho video (sạch nhất, chậm)"
+            />
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              {aiAvailable
+                ? 'Tái tạo nền dưới watermark bằng LaMa (xử lý ở backend). Lần đầu tải model ~88MB; cần ffmpeg.'
+                : 'Không khả dụng trong bản này — cần chạy bằng update.bat (onnxruntime + ffmpeg).'}
+              {aiStatus && aiAvailable && (
+                <>{' · '}{aiStatus.ffmpeg ? 'ffmpeg ✓' : 'ffmpeg ✗'}{' · '}
+                {(aiStatus.providers || []).some((p) => /Dml|CUDA/.test(p)) ? 'GPU ✓' : 'CPU (chậm)'}{' · '}
+                {aiStatus.model_ready ? 'model ✓' : 'model sẽ tải'}</>
+              )}
+            </Typography>
+          </Box>
           <Divider sx={{ my: 2 }} />
           <Typography variant="caption" color="text.secondary">
             Watermark engine: gemini-watermark-remover (MIT). Chỉ gỡ watermark hiển thị; dấu vô hình (SynthID) vẫn còn.

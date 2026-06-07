@@ -44,6 +44,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+echo       Installing optional AI inpaint packages ^(safe to skip on failure^)...
+python -m pip install -q -r backend\requirements-ai.txt
+if errorlevel 1 (
+  echo [WARN] AI inpaint packages not installed ^(needs Python 3.10+^). App runs without AI inpaint.
+)
 
 REM --- 3. Build the frontend ------------------------------------------
 echo.
