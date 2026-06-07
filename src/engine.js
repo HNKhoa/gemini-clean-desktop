@@ -15,8 +15,12 @@ let videoP = null;
 const SDK_URL = '/engine/vendor/gwr/sdk/image-data.js';
 const VIDEO_SERVICE_URL = '/engine/video-mp4-service.js';
 const ALPHA_URL = '/engine/vendor/gwr/core/embeddedAlphaMaps.js';
+const BLEND_URL = '/engine/vendor/gwr/core/blendModes.js';
+const METRICS_URL = '/engine/vendor/gwr/core/restorationMetrics.js';
+const ADAPTIVE_URL = '/engine/vendor/gwr/core/adaptiveDetector.js';
 
 let alphaP = null;
+let calibP = null;
 
 export function getSdk() {
   if (!sdkP) sdkP = import(/* @vite-ignore */ SDK_URL);
@@ -34,6 +38,25 @@ export function getVideoService() {
 function getAlphaModule() {
   if (!alphaP) alphaP = import(/* @vite-ignore */ ALPHA_URL);
   return alphaP;
+}
+
+// Lazy-load the proven engine routines used for per-video gain calibration.
+function getCalibModules() {
+  if (!calibP) {
+    calibP = Promise.all([
+      import(/* @vite-ignore */ BLEND_URL),
+      import(/* @vite-ignore */ METRICS_URL),
+      import(/* @vite-ignore */ ADAPTIVE_URL),
+      getAlphaModule(),
+    ]).then(([blend, metrics, adaptive, alpha]) => ({
+      removeWatermark: blend.removeWatermark,
+      scoreRegion: metrics.scoreRegion,
+      calculateNearBlackRatio: metrics.calculateNearBlackRatio,
+      interpolateAlphaMap: adaptive.interpolateAlphaMap,
+      getEmbeddedAlphaMap: alpha.getEmbeddedAlphaMap,
+    }));
+  }
+  return calibP;
 }
 
 // ── Video watermark auto-detection ──────────────────────────────────────────
@@ -195,6 +218,49 @@ export async function detectVideoWatermarkBox(file) {
   }
 }
 
+// Measure the watermark's real opacity for THIS video by sweeping the reverse-alpha
+// gain (including values < 1) and picking the one that best nulls the residual at the
+// logo. Opacity varies by clip/compression, so a fixed strength leaves a bright trace
+// (gain too low) or a dark ghost (gain too high). Runs once per video on one frame.
+export async function calibrateVideoGain(file, box) {
+  try {
+    if (!box || !(box.w > 0)) return null;
+    const eng = await getCalibModules();
+    const frame = await grabVideoFrame(file, 0.5);
+    const size = Math.round(box.w);
+    const bx = Math.round(box.x), by = Math.round(box.y);
+    if (bx < 0 || by < 0 || bx + size > frame.width || by + size > frame.height) return null;
+    // Extract the logo region into its own buffer.
+    const inner = new Uint8ClampedArray(size * size * 4);
+    const { width: FW, data } = frame;
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        const s = ((by + y) * FW + (bx + x)) * 4;
+        const d = (y * size + x) * 4;
+        inner[d] = data[s]; inner[d + 1] = data[s + 1]; inner[d + 2] = data[s + 2]; inner[d + 3] = 255;
+      }
+    }
+    const alpha = eng.interpolateAlphaMap(eng.getEmbeddedAlphaMap(96), 96, size);
+    const pos = { x: 0, y: 0, width: size, height: size };
+    const baseNB = eng.calculateNearBlackRatio({ width: size, height: size, data: inner }, pos);
+    let best = { gain: 0.62, residual: Infinity };
+    for (let g = 0.30; g <= 2.21; g += 0.05) {
+      const gain = Math.round(g * 100) / 100;
+      const img = { width: size, height: size, data: new Uint8ClampedArray(inner) };
+      eng.removeWatermark(img, alpha, pos, { alphaGain: gain });
+      // Reject gains that crush the region toward black (over-removal artefact).
+      if (eng.calculateNearBlackRatio(img, pos) > baseNB + 0.06) continue;
+      const residual = Math.abs(eng.scoreRegion(img, alpha, pos).spatialScore);
+      if (residual < best.residual) best = { gain, residual };
+    }
+    console.log('[engine] calibrated removal gain', best.gain, 'residual', best.residual.toFixed(3));
+    return best.gain;
+  } catch (e) {
+    console.warn('[engine] gain calibration failed:', e);
+    return null;
+  }
+}
+
 const IMG_MIME = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
 export function classifyMediaFile(file) {
@@ -264,12 +330,14 @@ export async function processVideo(file, onProgress, signal, maxOutputDimension 
   // Locate the watermark first (so removal targets the real position, not a preset).
   onProgress(0.02, 'Đang dò watermark…');
   const watermarkBox = await detectVideoWatermarkBox(file).catch(() => null);
+  // Calibrate the removal strength to this video's actual watermark opacity.
+  const gain = watermarkBox ? await calibrateVideoGain(file, watermarkBox).catch(() => null) : null;
   const result = await processVideoWatermarkMp4(file, ({ progress, currentFrame, totalFrames, speedFps, warning }) => {
     const info = currentFrame && totalFrames
       ? `${currentFrame}/${totalFrames}${speedFps ? ` · ${speedFps.toFixed(1)}fps` : ''}`
       : (warning || '');
     onProgress(Math.max(0.02, Math.min(0.98, (progress || 0) / 100)), info);
-  }, signal, { maxOutputDimension, watermarkBox });
+  }, signal, { maxOutputDimension, watermarkBox, gain });
   return {
     blob: result.blob,
     name: result.filename || `clean_${baseName(file.name)}.mp4`,

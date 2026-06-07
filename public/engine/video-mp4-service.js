@@ -250,6 +250,9 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
   // Cap the OUTPUT long side (0 = keep original). Large inputs (4K) are
   // downscaled so software H.264 encode stays fast and memory stays bounded.
   const maxOutputDimension = Number(options.maxOutputDimension) > 0 ? Number(options.maxOutputDimension) : 0;
+  // Per-video reverse-alpha strength, calibrated in engine.js to the watermark's real
+  // opacity (falls back to the default if calibration was unavailable).
+  const removalGain = Number(options.gain) > 0 ? Number(options.gain) : VIDEO_INTENSITY;
 
   const startedAt = Date.now();
   const workers = [];
@@ -342,7 +345,7 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
           height: outputHeight,
           meta: {
             watermarkBox: { x: box.x, y: box.y, w: box.w, h: box.h },
-            intensity: VIDEO_INTENSITY,
+            gain: removalGain,
             outlineWidth: VIDEO_OUTLINE_WIDTH,
             inpaintRadius: VIDEO_INPAINT_RADIUS,
             warning: unsupportedAudioWarning
@@ -636,7 +639,7 @@ export async function processVideoWatermarkMp4(file, onProgress, signal, options
             innerY: wmInnerY,
             innerW: wmInnerW,
             innerH: wmInnerH,
-            intensity: VIDEO_INTENSITY,
+            gain: removalGain,
             outlineWidth: VIDEO_OUTLINE_WIDTH,
             inpaintRadius: VIDEO_INPAINT_RADIUS
           }, [bitmapWorker]);

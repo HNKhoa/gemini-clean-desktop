@@ -1,4 +1,5 @@
 import { getEmbeddedAlphaMap } from './vendor/gwr/core/embeddedAlphaMaps.js';
+import { removeWatermark } from './vendor/gwr/core/blendModes.js';
 
 const ALPHA_MAX = 0.50588235;
 let offscreenCanvas = null;
@@ -53,15 +54,6 @@ function getAlphaMap(width, height) {
 
 function clamp(value) {
   return Math.max(0, Math.min(255, Math.round(value)));
-}
-
-function getVideoReverseAlpha(rawAlpha, intensity) {
-  const edgeStart = 0.16;
-  const edgeEnd = 0.36;
-  const t = Math.max(0, Math.min(1, (rawAlpha - edgeStart) / (edgeEnd - edgeStart)));
-  const smooth = t * t * (3 - 2 * t);
-  const featherBoost = 1.34 - 0.34 * smooth;
-  return rawAlpha * intensity * featherBoost;
 }
 
 function buildRepairMask(alphaMap, width, height, outlineWidth) {
@@ -279,16 +271,15 @@ function backgroundIsStructured(data, cw, ch, icx, icy, wmR) {
 // Process one expanded crop: reverse-alpha + outline repair on the inner
 // (aligned) logo region, then a radial blur that dissolves the logo and feathers
 // into the margin (eliminates the residual outline/tips on smooth backgrounds).
-function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensity, outlineWidth, inpaintRadius) {
+function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, gain, outlineWidth, inpaintRadius) {
   const wmRadius = Math.max(innerW, innerH) / 2;
   const cx = innerX + innerW / 2;
   const cy = innerY + innerH / 2;
-  // Adapt to the background. Smooth backgrounds keep the original radial soften (it
-  // is invisible there and dissolves any outline well). Structured backgrounds get
-  // a slightly gentler reverse-alpha (less dark ghost on bright logos) and a soften
-  // confined to the logo footprint, so the surrounding lines stay sharp.
+  // Adapt the soften to the background. Smooth backgrounds keep the original radial
+  // soften (invisible there, dissolves any outline). Structured backgrounds (grids,
+  // geometric art) confine the soften to the logo footprint so surrounding lines stay
+  // sharp. Removal strength is the per-video calibrated gain (measured in engine.js).
   const structured = backgroundIsStructured(data, cropW, cropH, cx, cy, wmRadius);
-  const useIntensity = structured ? intensity * 0.8 : intensity;
 
   const inner = new Uint8ClampedArray(innerW * innerH * 4);
   for (let iy = 0; iy < innerH; iy += 1) {
@@ -298,7 +289,7 @@ function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensi
       inner[dst] = data[s]; inner[dst + 1] = data[s + 1]; inner[dst + 2] = data[s + 2]; inner[dst + 3] = data[s + 3];
     }
   }
-  removeWatermarkFromData(inner, innerW, innerH, useIntensity, outlineWidth, inpaintRadius);
+  removeWatermarkFromData(inner, innerW, innerH, gain, outlineWidth, inpaintRadius);
   for (let iy = 0; iy < innerH; iy += 1) {
     for (let ix = 0; ix < innerW; ix += 1) {
       const dst = ((innerY + iy) * cropW + (innerX + ix)) * 4;
@@ -314,28 +305,21 @@ function processCrop(data, cropW, cropH, innerX, innerY, innerW, innerH, intensi
   }
 }
 
-function removeWatermarkFromData(data, width, height, intensity, outlineWidth, inpaintRadius) {
+function removeWatermarkFromData(data, width, height, gain, outlineWidth, inpaintRadius) {
+  // Reverse-alpha un-blend using the proven engine routine with a per-video
+  // calibrated gain. The watermark's real opacity varies by clip/compression, so a
+  // fixed strength over- or under-removes (a too-strong gain turns a bright logo
+  // into a dark ghost). engine.js measures the gain once per video; we apply it
+  // here, then repair the residual outline.
   const alphaMap = getAlphaMap(width, height);
-  const original = new Uint8ClampedArray(data);
-  const logoValue = 255;
-
-  for (let idx = 0; idx < width * height; idx += 1) {
-    const off = idx * 4;
-    const rawAlpha = alphaMap[idx] || 0;
-    if (rawAlpha <= 0.000001) continue;
-    const alpha = Math.min(getVideoReverseAlpha(rawAlpha, intensity), 0.99);
-    const oneMinusAlpha = 1 - alpha;
-    data[off] = clamp((original[off] - alpha * logoValue) / oneMinusAlpha);
-    data[off + 1] = clamp((original[off + 1] - alpha * logoValue) / oneMinusAlpha);
-    data[off + 2] = clamp((original[off + 2] - alpha * logoValue) / oneMinusAlpha);
-  }
-
+  removeWatermark({ width, height, data }, alphaMap, { x: 0, y: 0, width, height }, { alphaGain: gain });
   repairOutline(data, alphaMap, width, height, outlineWidth, inpaintRadius);
 }
 
 if (typeof self !== 'undefined') {
 self.onmessage = async (event) => {
-  const { id, frameBitmap, x, y, w, h, intensity, outlineWidth, inpaintRadius } = event.data;
+  const { id, frameBitmap, x, y, w, h, outlineWidth, inpaintRadius } = event.data;
+  const gain = Number(event.data.gain) > 0 ? event.data.gain : 0.62;
   let { innerX, innerY, innerW, innerH } = event.data;
   if (!innerW || !innerH) { innerX = 0; innerY = 0; innerW = w; innerH = h; }
 
@@ -353,7 +337,7 @@ self.onmessage = async (event) => {
       offscreenCtx.drawImage(frameBitmap, x, y, w, h, 0, 0, w, h);
     }
     const imageData = offscreenCtx.getImageData(0, 0, w, h);
-    processCrop(imageData.data, w, h, innerX, innerY, innerW, innerH, intensity, outlineWidth, inpaintRadius);
+    processCrop(imageData.data, w, h, innerX, innerY, innerW, innerH, gain, outlineWidth, inpaintRadius);
     offscreenCtx.putImageData(imageData, 0, 0);
     finalBitmap = await createImageBitmap(offscreenCanvas);
     self.postMessage({ id, processedBox: finalBitmap }, [finalBitmap]);
