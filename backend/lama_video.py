@@ -43,6 +43,17 @@ def _model_path() -> str:
     return str(pathlib.Path.home() / ".gemini-clean" / "models" / "inpainting_lama.onnx")
 
 
+def _preload_cuda():
+    # Make the CUDA/cuDNN/cuFFT DLLs from the nvidia-*-cu12 pip wheels loadable so the
+    # CUDAExecutionProvider can initialise (onnxruntime-gpu builds only). No-op on the
+    # CPU/DirectML builds and when the libs aren't installed.
+    try:
+        if hasattr(ort, "preload_dlls"):
+            ort.preload_dlls()
+    except Exception:
+        pass
+
+
 def _build_session(model, providers):
     so = ort.SessionOptions()
     so.log_severity_level = 4  # quiet: we probe providers and handle failures ourselves
@@ -66,6 +77,7 @@ def get_session():
                 model = _model_path()
                 if not os.path.exists(model):
                     raise FileNotFoundError(f"LaMa model not found at {model}")
+                _preload_cuda()
                 avail = set(ort.get_available_providers())
                 # Prefer a GPU EP, but VALIDATE it with a warm-up run and fall back to
                 # CPU if it can't actually execute the model (DirectML reliably fails on

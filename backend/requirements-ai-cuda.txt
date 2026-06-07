@@ -1,0 +1,15 @@
+# NVIDIA GPU (CUDA) acceleration for AI inpaint — run setup-gpu.bat, which installs
+# THESE INSTEAD of the default onnxruntime-directml (the two onnxruntime builds
+# conflict, so setup-gpu.bat uninstalls the others first). Needs an NVIDIA GPU
+# (e.g. GTX 1660 Ti) + a recent NVIDIA driver. DirectML can't run LaMa, but CUDA can,
+# and it is much faster than CPU. If CUDA can't initialise, the app safely falls back
+# to CPU (validated by a startup warm-up).
+onnxruntime-gpu>=1.21.0 ; python_version >= "3.10"
+# CUDA 12 runtime libraries (so no separate CUDA Toolkit install is needed).
+# onnxruntime.preload_dlls() loads these for the CUDA provider.
+nvidia-cuda-runtime-cu12 ; python_version >= "3.10"
+nvidia-cudnn-cu12 ; python_version >= "3.10"
+nvidia-cublas-cu12 ; python_version >= "3.10"
+nvidia-cufft-cu12 ; python_version >= "3.10"
+numpy>=1.24.0 ; python_version >= "3.10"
+Pillow>=10.0.0 ; python_version >= "3.10"
