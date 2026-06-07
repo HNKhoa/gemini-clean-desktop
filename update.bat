@@ -44,10 +44,15 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-echo       Installing optional AI inpaint packages ^(safe to skip on failure^)...
-python -m pip install -q -r backend\requirements-ai.txt
+python -m pip show onnxruntime-gpu >nul 2>nul
 if errorlevel 1 (
-  echo [WARN] AI inpaint packages not installed ^(needs Python 3.10+^). App runs without AI inpaint.
+  echo       Installing optional AI inpaint packages ^(safe to skip on failure^)...
+  python -m pip install -q -r backend\requirements-ai.txt
+  if errorlevel 1 (
+    echo [WARN] AI inpaint packages not installed ^(needs Python 3.10+^). App runs without AI inpaint.
+  )
+) else (
+  echo       NVIDIA CUDA build detected - keeping it ^(run setup-gpu.bat to reinstall^).
 )
 
 REM --- 3. Build the frontend ------------------------------------------
