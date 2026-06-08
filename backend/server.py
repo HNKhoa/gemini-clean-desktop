@@ -58,6 +58,8 @@ LAMA_SIZE = 92591623  # bytes (Apache-2.0, opencv/inpainting_lama)
 LAMA_SHA256 = "7df918ac3921d3daf0aae1d219776cf0dc4e4935f035af81841b40adcf74fdf2"
 ai_jobs = {}  # job_id -> progress dict (in-memory; single-user desktop)
 _ai_sema = threading.Semaphore(1)  # at most one heavy AI job runs at a time
+wm_jobs = {}  # add-watermark jobs
+_wm_sema = threading.Semaphore(1)
 
 app = FastAPI(title="Gemini Clean Backend")
 # The renderer is served by this backend (same-origin) in production, so CORS is
@@ -451,6 +453,175 @@ def ai_cancel(job_id: str):
     if not job:
         return JSONResponse({"ok": False, "error": "unknown job"}, status_code=404)
     job["cancel"] = True  # the worker checks this per frame and stops cleanly
+    return {"ok": True}
+
+
+# ── Add watermark (visible overlay + optional hidden payload) ─────────────────
+def _wm_available() -> bool:
+    try:
+        ok = (importlib.util.find_spec("watermark") is not None
+              and importlib.util.find_spec("numpy") is not None
+              and importlib.util.find_spec("PIL") is not None)
+    except Exception:
+        ok = False
+    return ok and bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+@app.get("/api/wm-status")
+def wm_status():
+    return {"available": _wm_available(),
+            "ffmpeg": bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))}
+
+
+def _as_bool(v):
+    return str(v).lower() in ("1", "true", "on", "yes")
+
+
+def _as_float(v, default):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _as_int(v, default=None):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
+    job = wm_jobs[job_id]
+    out_tmp = os.path.join(job_dir, "out.mp4")
+    acquired = False
+    try:
+        _wm_sema.acquire()
+        acquired = True
+        if job.get("cancel"):
+            raise RuntimeError("cancelled")
+        job["status"] = "processing"
+        job["stage"] = "watermark"
+        job["progress"] = 0.3
+        import watermark as W
+        text = None
+        if opts.get("text"):
+            text = W.TextSpec(
+                text=opts["text"], color=opts.get("color", "white"),
+                opacity=opts.get("opacity", 0.5), fontsize_ratio=opts.get("fontsize_ratio", 0.05),
+                stroke_width=opts.get("stroke_width", 0), shadow=opts.get("shadow", False),
+                rotate=opts.get("rotate", 0.0), tile=opts.get("tile", False),
+                sparkle=opts.get("sparkle", False), glow=opts.get("glow", False),
+            )
+        logo = W.LogoSpec(path=logo_path, scale=opts.get("logo_scale", 0.15),
+                          opacity=opts.get("logo_opacity", 1.0)) if logo_path else None
+        if text is None and logo is None:
+            raise RuntimeError("cần ít nhất chữ (text) hoặc logo")
+        vw = W.VisibleWatermarker(
+            text=text, logo=logo, position=opts.get("position", "bottom-right"),
+            motion=opts.get("motion", "none"), motion_interval=opts.get("motion_interval", 3.0),
+            seed=opts.get("seed"), crf=opts.get("crf", 20), preset=opts.get("preset", "medium"),
+        )
+        if opts.get("hidden") and opts.get("password") and opts.get("payload"):
+            vis_tmp = os.path.join(job_dir, "vis.mp4")
+            vw.apply(in_path, vis_tmp)
+            if job.get("cancel"):
+                raise RuntimeError("cancelled")
+            job["progress"] = 0.7
+            iw = W.InvisibleWatermarker(password=opts["password"])
+            stats = iw.embed(vis_tmp, out_tmp, opts["payload"])
+            job["hidden_bytes"] = stats.get("n_bytes")
+        else:
+            vw.apply(in_path, out_tmp)
+        if job.get("cancel"):
+            raise RuntimeError("cancelled")
+        folder = output_dir()
+        base = safe_name(os.path.splitext(orig_name)[0]) or "video"
+        target = unique_path(folder, f"wm_{base}.mp4")
+        os.replace(out_tmp, str(target))
+        size = target.stat().st_size
+        conn = db()
+        conn.execute("INSERT INTO history (name, path, kind, size, created_at) VALUES (?, ?, ?, ?, ?)",
+                     (target.name, str(target), "video", size, int(time.time())))
+        conn.commit()
+        conn.close()
+        job.update({"status": "done", "progress": 1, "path": str(target), "name": target.name})
+    except Exception as e:  # pragma: no cover
+        if job.get("cancel"):
+            job.update({"status": "cancelled", "error": "cancelled"})
+        else:
+            job.update({"status": "error", "error": str(e)})
+    finally:
+        if acquired:
+            _wm_sema.release()
+        shutil.rmtree(job_dir, ignore_errors=True)
+        threading.Timer(180, lambda: wm_jobs.pop(job_id, None)).start()
+
+
+@app.post("/api/add-watermark")
+async def add_watermark(
+    file: UploadFile = File(...), name: str = Form(...),
+    text: str = Form(""), color: str = Form("white"), opacity: str = Form("0.5"),
+    position: str = Form("bottom-right"), fontsize_ratio: str = Form("0.05"),
+    stroke_width: str = Form("0"), shadow: str = Form("0"), rotate: str = Form("0"),
+    tile: str = Form("0"), sparkle: str = Form("0"), glow: str = Form("0"),
+    motion: str = Form("none"), motion_interval: str = Form("3"), seed: str = Form(""),
+    logo_scale: str = Form("0.15"), logo_opacity: str = Form("1.0"),
+    crf: str = Form("20"), preset: str = Form("medium"),
+    hidden: str = Form("0"), password: str = Form(""), payload: str = Form(""),
+    logo: UploadFile = File(None),
+):
+    job_id = uuid.uuid4().hex
+    job_dir = DATA_DIR / "tmp" / ("wm_" + job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    in_path = str(job_dir / safe_name(name))
+    data = await file.read()
+    logo_path = None
+    ldata = b""
+    if logo is not None:
+        ldata = await logo.read()
+        if ldata:
+            logo_path = str(job_dir / ("logo_" + safe_name(logo.filename or "logo.png")))
+
+    def _persist():
+        with open(in_path, "wb") as f:
+            f.write(data)
+        if logo_path:
+            with open(logo_path, "wb") as f:
+                f.write(ldata)
+
+    await run_in_threadpool(_persist)
+    opts = {
+        "text": text.strip(), "color": color or "white", "opacity": _as_float(opacity, 0.5),
+        "position": position or "bottom-right", "fontsize_ratio": _as_float(fontsize_ratio, 0.05),
+        "stroke_width": _as_int(stroke_width, 0) or 0, "shadow": _as_bool(shadow),
+        "rotate": _as_float(rotate, 0.0), "tile": _as_bool(tile),
+        "sparkle": _as_bool(sparkle), "glow": _as_bool(glow),
+        "motion": motion or "none", "motion_interval": _as_float(motion_interval, 3.0),
+        "seed": _as_int(seed), "logo_scale": _as_float(logo_scale, 0.15),
+        "logo_opacity": _as_float(logo_opacity, 1.0), "crf": _as_int(crf, 20) or 20,
+        "preset": preset or "medium", "hidden": _as_bool(hidden),
+        "password": password, "payload": payload,
+    }
+    wm_jobs[job_id] = {"status": "queued", "progress": 0, "cancel": False}
+    threading.Thread(target=_run_wm_job, args=(job_id, in_path, logo_path, name, opts, str(job_dir)), daemon=True).start()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/wm-job/{job_id}")
+def wm_job(job_id: str):
+    job = wm_jobs.get(job_id)
+    if not job:
+        return JSONResponse({"ok": False, "error": "unknown job"}, status_code=404)
+    return {"ok": True, **job}
+
+
+@app.post("/api/wm-cancel/{job_id}")
+def wm_cancel(job_id: str):
+    job = wm_jobs.get(job_id)
+    if not job:
+        return JSONResponse({"ok": False, "error": "unknown job"}, status_code=404)
+    job["cancel"] = True
     return {"ok": True}
 
 

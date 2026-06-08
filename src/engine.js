@@ -392,6 +392,38 @@ export function getAiStatus() {
   return apiFetch('/api/ai-status').then((r) => r.json()).catch(() => ({}));
 }
 
+export function getWmStatus() {
+  return apiFetch('/api/wm-status').then((r) => r.json()).catch(() => ({}));
+}
+
+// Add a watermark (visible overlay + optional hidden payload) to a video. The
+// backend renders + re-encodes and saves the result; this uploads + polls.
+export async function addWatermark(file, logoFile, opts, onProgress, signal) {
+  onProgress(0.05, 'Tải lên…');
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  fd.append('name', file.name);
+  Object.entries(opts || {}).forEach(([k, v]) => fd.append(k, v == null ? '' : String(v)));
+  if (logoFile) fd.append('logo', logoFile, logoFile.name);
+  const res = await apiFetch('/api/add-watermark', { method: 'POST', body: fd });
+  if (!res.ok) throw new Error('Thêm watermark thất bại: HTTP ' + res.status);
+  const { job_id } = await res.json();
+  if (!job_id) throw new Error('Không tạo được job');
+  const cancelJob = () => apiFetch('/api/wm-cancel/' + job_id, { method: 'POST' }).catch(() => {});
+  for (;;) {
+    if (signal?.aborted) { cancelJob(); throw new Error('Cancelled'); }
+    await new Promise((r) => setTimeout(r, 800));
+    if (signal?.aborted) { cancelJob(); throw new Error('Cancelled'); }
+    const jr = await apiFetch('/api/wm-job/' + job_id);
+    if (!jr.ok) throw new Error('Mất job');
+    const j = await jr.json();
+    onProgress(Math.max(0.05, Math.min(0.95, j.progress || 0.3)), 'Đang thêm watermark…');
+    if (j.status === 'done') return { path: j.path, name: j.name };
+    if (j.status === 'cancelled') throw new Error('Cancelled');
+    if (j.status === 'error') throw new Error(j.error || 'Thất bại');
+  }
+}
+
 export async function saveToDisk(blob, name, kind) {
   const fd = new FormData();
   fd.append('file', blob, name);

@@ -2,5 +2,9 @@ fastapi>=0.111.0
 uvicorn>=0.30.0
 h11>=0.14.0
 python-multipart>=0.0.9
+# "Add watermark" tab (renders frames with numpy + Pillow; needs ffmpeg on PATH).
+numpy>=1.24.0
+Pillow>=10.0.0
+# (optional) imageio-ffmpeg — only a fallback if no system ffmpeg is on PATH.
 # Optional "AI inpaint" deps live in requirements-ai.txt (installed non-fatally by
 # update.bat) so a missing/incompatible wheel never blocks the core app from launching.

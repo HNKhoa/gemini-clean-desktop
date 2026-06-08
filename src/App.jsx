@@ -3,6 +3,7 @@ import {
   AppBar, Toolbar, Typography, Box, Button, IconButton, Container, Paper, Stack,
   LinearProgress, Chip, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Divider, Switch, FormControlLabel, Select, MenuItem, FormControl, InputLabel,
+  Tabs, Tab,
 } from '@mui/material';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import SettingsIcon from '@mui/icons-material/Settings';
@@ -18,6 +19,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import { apiFetch, classifyMediaFile, processImage, processVideo, processVideoAI, getAiStatus, saveToDisk } from './engine.js';
+import AddWatermarkTab from './AddWatermarkTab.jsx';
 
 const MAX_IMAGES = 20;
 const MAX_VIDEOS = 5;
@@ -78,6 +80,7 @@ function JobRow({ job, busy, onRemove, onOpen, onRetry }) {
 }
 
 export default function App() {
+  const [tab, setTab] = useState(0);
   const [jobs, setJobs] = useState([]);
   const [processing, setProcessing] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -250,6 +253,13 @@ export default function App() {
         </Toolbar>
       </AppBar>
 
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth"
+        sx={{ borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+        <Tab label="Xoá watermark" />
+        <Tab label="Thêm watermark" />
+      </Tabs>
+
+      {tab === 0 && (
       <Container maxWidth="md" sx={{ py: 3, flex: 1 }}>
         <Paper
           variant="outlined"
@@ -320,6 +330,8 @@ export default function App() {
           </Typography>
         )}
       </Container>
+      )}
+      {tab === 1 && <AddWatermarkTab outputDir={outputDir} onToast={setToast} />}
 
       <Dialog open={settingsOpen} onClose={() => setSettingsOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Cài đặt</DialogTitle>

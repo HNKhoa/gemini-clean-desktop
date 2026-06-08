@@ -1,6 +1,6 @@
 # Gemini Clean — Desktop (Electron + React + MUI + Python)
 
-A desktop app to remove the **visible** Gemini watermark from **local** images and videos. Drop files in → cleaned files are saved to a folder. Everything runs locally; nothing is uploaded.
+A desktop app to **remove** the visible Gemini watermark from **local** images and videos, and (second tab) to **add** your own watermark to videos. Drop files in → results are saved to a folder. Everything runs locally; nothing is uploaded.
 
 This is the desktop port of the "Gemini Clean Downloader" extension. The downloading-from-Gemini step is browser-only (it needs a content script in your Gemini session), so the desktop app focuses on cleaning files you already have: download from Gemini in your browser (watermarked), then drop the file here.
 
@@ -14,8 +14,10 @@ This is the desktop port of the "Gemini Clean Downloader" extension. The downloa
 electron/main.cjs   → window + spawns backend (prod) + loads the UI
 backend/server.py   → FastAPI: /api/save, /api/settings, /api/history, /api/open-output,
                        /api/process-video-ai + /api/ai-job + /api/ai-status (AI inpaint), serves dist/ in prod
+                       /api/add-watermark + /api/wm-job + /api/wm-status (Add-watermark tab)
 backend/lama_video.py → AI inpaint pipeline (ffmpeg decode → LaMa ONNX per frame → encode)
-src/                → React + MUI app  (App.jsx, engine.js wrapper, theme.js)
+backend/watermark/  → "add watermark" toolkit (visible overlay + invisible payload, ffmpeg)
+src/                → React + MUI app  (App.jsx, AddWatermarkTab.jsx, engine.js wrapper, theme.js)
 public/engine/      → reused watermark engine (gwr + mp4box/mp4-muxer + workers)
 ```
 
@@ -58,6 +60,12 @@ Reverse-alpha removes the logo but can leave a faint trace on sharp/structured b
 - Slower than the instant reverse-alpha path — intended for when you need a perfectly clean result. The toggle is off by default; the app falls back to reverse-alpha if ffmpeg/onnxruntime are unavailable.
 
 > AI inpaint is verified via the **`update.bat` (source) run**, which installs onnxruntime/numpy/Pillow. The current `package.bat` portable build ships the standard reverse-alpha method only.
+
+## Add watermark (second tab)
+Adds your own watermark to a video, in the backend (numpy + Pillow + ffmpeg):
+- **Visible**: text and/or a logo PNG — position, opacity, colour, font size, diagonal tile, drop-shadow, a Gemini/Veo-style spark ✦ + glow, and motion (static / random jumps / DVD bounce). The original audio is copied untouched.
+- **Invisible (advanced)**: a robust, blind payload embedded in the frequency domain (survives re-encode); extract later with the same password + byte count.
+- Needs numpy + Pillow (core deps, installed by `update.bat`) and **ffmpeg** on PATH. Like AI inpaint, this runs from the **`update.bat` (source) run**; the portable build shows it as unavailable. Output is saved as `wm_<name>.mp4`.
 
 ## Notes & limitations
 - Removes the **visible** watermark only — invisible provenance marks (e.g. **SynthID**) remain.
