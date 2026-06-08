@@ -184,6 +184,15 @@ def unique_path(folder: pathlib.Path, name: str) -> pathlib.Path:
         i += 1
 
 
+def _move(src: str, dst: str) -> None:
+    """Move a file to dst, falling back to copy+remove across volumes — os.replace
+    can't rename across drives (e.g. an output folder on a different disk)."""
+    try:
+        os.replace(src, dst)
+    except OSError:
+        shutil.move(src, dst)
+
+
 # ── API ─────────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health():
@@ -395,7 +404,7 @@ def _run_ai_job(job_id, in_path, orig_name, job_dir):
         folder = output_dir()
         base = safe_name(os.path.splitext(orig_name)[0]) or "video"
         target = unique_path(folder, f"clean_{base}.mp4")
-        os.replace(out_tmp, str(target))
+        _move(out_tmp, str(target))
         size = target.stat().st_size
         conn = db()
         conn.execute(
@@ -417,7 +426,7 @@ def _run_ai_job(job_id, in_path, orig_name, job_dir):
         if acquired:
             _ai_sema.release()
         shutil.rmtree(job_dir, ignore_errors=True)  # removes upload + any partial out
-        threading.Timer(180, lambda: ai_jobs.pop(job_id, None)).start()  # evict terminal job
+        threading.Timer(600, lambda: ai_jobs.pop(job_id, None)).start()  # evict terminal job
 
 
 @app.post("/api/process-video-ai")
@@ -504,6 +513,16 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
         job["stage"] = "watermark"
         job["progress"] = 0.3
         import watermark as W
+        # Fail loud instead of silently producing a visible-only result when the
+        # hidden watermark was requested but its credentials are missing.
+        if opts.get("hidden") and (not opts.get("password") or not (opts.get("payload") or "").strip()):
+            raise RuntimeError("Watermark ẩn cần mật khẩu và nội dung (payload)")
+        if opts.get("text") and opts.get("color"):
+            try:
+                from PIL import ImageColor
+                ImageColor.getrgb(opts["color"])
+            except Exception:
+                raise RuntimeError(f"Màu không hợp lệ: {opts.get('color')}")
         text = None
         if opts.get("text"):
             text = W.TextSpec(
@@ -529,7 +548,8 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
                 raise RuntimeError("cancelled")
             job["progress"] = 0.7
             iw = W.InvisibleWatermarker(password=opts["password"])
-            stats = iw.embed(vis_tmp, out_tmp, opts["payload"])
+            stats = iw.embed(vis_tmp, out_tmp, opts["payload"],
+                             should_cancel=lambda: bool(job.get("cancel")))
             job["hidden_bytes"] = stats.get("n_bytes")
         else:
             vw.apply(in_path, out_tmp)
@@ -538,7 +558,7 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
         folder = output_dir()
         base = safe_name(os.path.splitext(orig_name)[0]) or "video"
         target = unique_path(folder, f"wm_{base}.mp4")
-        os.replace(out_tmp, str(target))
+        _move(out_tmp, str(target))
         size = target.stat().st_size
         conn = db()
         conn.execute("INSERT INTO history (name, path, kind, size, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -555,7 +575,7 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
         if acquired:
             _wm_sema.release()
         shutil.rmtree(job_dir, ignore_errors=True)
-        threading.Timer(180, lambda: wm_jobs.pop(job_id, None)).start()
+        threading.Timer(600, lambda: wm_jobs.pop(job_id, None)).start()
 
 
 @app.post("/api/add-watermark")
@@ -601,7 +621,7 @@ async def add_watermark(
         "seed": _as_int(seed), "logo_scale": _as_float(logo_scale, 0.15),
         "logo_opacity": _as_float(logo_opacity, 1.0), "crf": _as_int(crf, 20) or 20,
         "preset": preset or "medium", "hidden": _as_bool(hidden),
-        "password": password, "payload": payload,
+        "password": password, "payload": (payload or "").strip(),
     }
     wm_jobs[job_id] = {"status": "queued", "progress": 0, "cancel": False}
     threading.Thread(target=_run_wm_job, args=(job_id, in_path, logo_path, name, opts, str(job_dir)), daemon=True).start()

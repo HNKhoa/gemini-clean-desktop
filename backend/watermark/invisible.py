@@ -119,7 +119,7 @@ class InvisibleWatermarker:
         return q * delta
 
     # -- public API ------------------------------------------------------- #
-    def embed(self, input_path: str, output_path: str, message: str) -> dict:
+    def embed(self, input_path: str, output_path: str, message: str, should_cancel=None) -> dict:
         ensure_input_exists(input_path)
         info = _io.probe(input_path, ffprobe=self.ffprobe)
         nb, perm = self._frame_layout(info.width, info.height)
@@ -145,6 +145,8 @@ class InvisibleWatermarker:
         with writer:
             for y, u, v in _io.read_yuv420p_frames(input_path, info.width,
                                                    info.height, ffmpeg=self.ffmpeg):
+                if should_cancel and should_cancel():
+                    raise WatermarkError("cancelled")
                 if idx % self.cfg.every_nth == 0:
                     y2 = self._embed_luma(y, bit_for_block)
                     if psnr_n < 30:  # sample luma PSNR on the first frames

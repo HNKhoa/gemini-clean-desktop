@@ -418,7 +418,7 @@ export async function addWatermark(file, logoFile, opts, onProgress, signal) {
     if (!jr.ok) throw new Error('Mất job');
     const j = await jr.json();
     onProgress(Math.max(0.05, Math.min(0.95, j.progress || 0.3)), 'Đang thêm watermark…');
-    if (j.status === 'done') return { path: j.path, name: j.name };
+    if (j.status === 'done') return { path: j.path, name: j.name, hiddenBytes: j.hidden_bytes };
     if (j.status === 'cancelled') throw new Error('Cancelled');
     if (j.status === 'error') throw new Error(j.error || 'Thất bại');
   }

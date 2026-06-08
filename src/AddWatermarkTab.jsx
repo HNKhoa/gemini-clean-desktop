@@ -38,6 +38,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const [progress, setProgress] = useState(0);
   const [info, setInfo] = useState('');
   const [savedPath, setSavedPath] = useState('');
+  const [hiddenBytes, setHiddenBytes] = useState(null);
   const [available, setAvailable] = useState(true);
 
   const fileRef = useRef(null);
@@ -45,7 +46,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const abortRef = useRef(null);
   const busy = status === 'processing';
 
-  useEffect(() => { getWmStatus().then((s) => setAvailable(s.available !== false)).catch(() => {}); }, []);
+  useEffect(() => { getWmStatus().then((s) => setAvailable(!!(s && s.available === true))).catch(() => setAvailable(false)); }, []);
 
   const pickFile = (e) => {
     const f = (e.target.files || [])[0];
@@ -58,7 +59,8 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const run = async () => {
     if (!file || busy) return;
     if (!text.trim() && !logoFile) { onToast?.('Cần nhập chữ hoặc chọn logo'); return; }
-    setStatus('processing'); setProgress(0.05); setInfo(''); setSavedPath('');
+    if (hidden && (!password.trim() || !payload.trim())) { onToast?.('Watermark ẩn cần mật khẩu và nội dung'); return; }
+    setStatus('processing'); setProgress(0.05); setInfo(''); setSavedPath(''); setHiddenBytes(null);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -69,8 +71,9 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         hidden, password, payload,
       };
       const out = await addWatermark(file, logoFile, opts, (p, i) => { setProgress(p); setInfo(i); }, controller.signal);
-      setStatus('done'); setProgress(1); setSavedPath(out.path);
-      onToast?.('Đã thêm watermark — đã lưu: ' + out.name);
+      setStatus('done'); setProgress(1); setSavedPath(out.path); setHiddenBytes(out.hiddenBytes ?? null);
+      onToast?.('Đã thêm watermark — đã lưu: ' + out.name
+        + (out.hiddenBytes ? ` · watermark ẩn ${out.hiddenBytes} byte (ghi lại để trích xuất)` : ''));
     } catch (e) {
       const msg = e?.message || 'Thất bại';
       const cancelled = /cancel/i.test(msg);
@@ -223,6 +226,11 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         {savedPath && (
           <Typography variant="caption" color="text.secondary" noWrap title={savedPath}>➜ {savedPath}</Typography>
         )}
+        {hiddenBytes ? (
+          <Typography variant="caption" color="warning.main" sx={{ display: 'block' }}>
+            Watermark ẩn: <b>{hiddenBytes} byte</b> — ghi lại số này + mật khẩu để trích xuất sau.
+          </Typography>
+        ) : null}
         <Typography variant="caption" color="text.secondary">
           File lưu vào: <b>{outputDir || '…'}</b>
         </Typography>
