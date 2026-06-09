@@ -42,6 +42,16 @@ const BRANDS = [
     note: 'Runway: logo tĩnh "ở góc" trên bản free — nguồn KHÔNG nêu rõ góc nào (độ tin cậy thấp); tạm để dưới-phải, chỉnh thêm nếu cần.' },
 ];
 
+// Built-in brand logos (Xưởng AI Content) bundled at public/brand -> served at
+// /brand/... by the backend. One click loads them as the watermark logo so the
+// user never has to browse for the file. `scale` = width as a fraction of the
+// video; defaults follow the brand guide (KT AI watermark, 45–65% opacity).
+const BRAND_LOGOS = [
+  { id: 'kt-ai-white', label: 'KT AI (trắng)', file: 'kt-ai-watermark-white.png', scale: 0.22 },
+  { id: 'kt-ai-black', label: 'KT AI (đen)', file: 'kt-ai-watermark-black.png', scale: 0.22 },
+  { id: 'full-white', label: 'Logo đầy đủ', file: 'kt-xuong-ai-content-white.png', scale: 0.32 },
+];
+
 // Fonts. `file` is the Windows font-file basename the backend resolves against
 // C:\Windows\Fonts (Pillow); `css`/`weight` drive the live preview so it matches.
 // These ship with Windows 10/11; the backend falls back to Arial if missing.
@@ -293,7 +303,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     if (lay.logo && logoImgRef.current) {
       const [lx, ly] = anchorOf(lay.logo.w, lay.logo.h);
       ctx.save();
-      ctx.globalAlpha = 1.0;
+      ctx.globalAlpha = clamp(opacity, 0, 1); // opacity slider now governs the logo too
       ctx.drawImage(logoImgRef.current, lx * s, ly * s, lay.logo.w * s, lay.logo.h * s);
       ctx.restore();
     }
@@ -515,6 +525,24 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     onToast?.(`Đã áp mẫu ${b.label} — chỉnh thêm trên khung xem trước nếu cần`);
   };
 
+  // Load a bundled brand logo (no file dialog) and apply brand-guide defaults.
+  const applyBrandLogo = async (b) => {
+    if (busy) return;
+    try {
+      const res = await fetch('/brand/' + b.file); // static asset, no CSRF header
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      setLogoFile(new File([blob], b.file, { type: blob.type || 'image/png' }));
+      setText('');                 // the brand mark IS the logo — avoid double text
+      setPosition('bottom-right'); setCustomXY(null);
+      setOpacity(0.65);            // brand guide: 45–65%; 65% reads best after H.264
+      setLogoScale(b.scale); setMotion('none'); setTile(false);
+      onToast?.(`Đã nạp logo ${b.label} — đã ẩn chữ để chỉ hiện logo`);
+    } catch (_) {
+      onToast?.('Không nạp được logo thương hiệu (cần chạy bằng update.bat)');
+    }
+  };
+
   const run = async () => {
     if (!file || busy) return;
     if (!text.trim() && !logoFile) { onToast?.('Cần nhập chữ hoặc chọn logo'); return; }
@@ -536,7 +564,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         custom_x: useCustom ? customXY[0] : '', custom_y: useCustom ? customXY[1] : '',
         fontsize_ratio: fontsize, stroke_width: strokeW, stroke_color: outlineColor,
         shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
-        logo_scale: logoScale, logo_opacity: 1.0, crf, preset: 'medium',
+        logo_scale: logoScale, logo_opacity: opacity, crf, preset: 'medium',
         hidden, password, payload,
       };
       const out = await addWatermark(file, logoFile, opts, (p, i) => { setProgress(p); setInfo(i); }, controller.signal);
@@ -724,7 +752,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         </Stack>
 
         <Box>
-          <Typography variant="caption" color="text.secondary">Độ mờ: {opacity.toFixed(2)}</Typography>
+          <Typography variant="caption" color="text.secondary">Độ mờ (chữ &amp; logo): {opacity.toFixed(2)}</Typography>
           <Slider size="small" min={0.05} max={1} step={0.05} value={opacity} disabled={busy}
             onChange={(_, v) => setOpacity(v)} />
         </Box>
@@ -748,9 +776,23 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           <FormControlLabel control={<Switch checked={shadow} onChange={(e) => setShadow(e.target.checked)} disabled={busy} />} label="Đổ bóng" />
         </Stack>
 
+        <Box>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+            Logo thương hiệu Xưởng AI (bấm để dùng ngay — không cần chọn file)
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+            {BRAND_LOGOS.map((b) => (
+              <Button key={b.id} size="small" variant="contained" color="secondary"
+                startIcon={<ImageIcon />} onClick={() => applyBrandLogo(b)} disabled={busy}>
+                {b.label}
+              </Button>
+            ))}
+          </Stack>
+        </Box>
+
         <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap', rowGap: 1 }}>
           <Button variant="outlined" size="small" startIcon={<ImageIcon />} onClick={() => logoRef.current?.click()} disabled={busy}>
-            {logoFile ? 'Logo: ' + logoFile.name : 'Chọn logo (PNG, tuỳ chọn)'}
+            {logoFile ? 'Logo: ' + logoFile.name : 'Chọn logo khác (PNG, tuỳ chọn)'}
           </Button>
           {logoFile && <Button size="small" color="inherit" onClick={() => setLogoFile(null)} disabled={busy}>Bỏ logo</Button>}
           <input ref={logoRef} type="file" hidden accept="image/png,image/webp,image/jpeg" onChange={pickLogo} />
