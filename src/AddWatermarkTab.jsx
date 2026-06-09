@@ -17,19 +17,29 @@ const isVideo = (f) => /^video\/(mp4|quicktime)$/.test(f.type) || /\.(mp4|mov|m4
 
 // Must match geometry.compute_xy default margin in backend/watermark/geometry.py.
 const MARGIN = 24;
+const HANDLE = 14; // resize-handle hit radius (display px)
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const snap = (v, step) => Math.round(v / step) * step;
 
-// Brand placement/style templates. These approximate where each platform
-// typically stamps its watermark — a starting point the user can fine-tune via
-// the preview. Text stays editable (e.g. TikTok's @username).
+// Brand placement/style templates. Positions are based on web research of each
+// platform's real on-video watermark (corner + motion); see each `note`. Text
+// stays editable (e.g. TikTok's @username). For brands whose mark MOVES
+// (Veo/Sora/TikTok) the corner is just the resting/start point — motion drives it.
 const BRANDS = [
-  { id: 'veo', label: 'Veo', text: 'Veo', position: 'bottom-left', sparkle: true, glow: true, shadow: false, color: 'white', opacity: 0.95, fontsize: 0.045, motion: 'none' },
-  { id: 'sora', label: 'Sora', text: 'Sora', position: 'bottom-right', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.9, fontsize: 0.05, motion: 'bounce' },
-  { id: 'capcut', label: 'CapCut', text: 'CapCut', position: 'top-right', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.92, fontsize: 0.05, motion: 'none' },
-  { id: 'tiktok', label: 'TikTok', text: '@username', position: 'top-left', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.045, motion: 'random' },
-  { id: 'kling', label: 'Kling AI', text: 'KLING AI', position: 'bottom-right', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.04, motion: 'none' },
-  { id: 'pika', label: 'Pika', text: 'Pika', position: 'bottom-left', sparkle: false, glow: true, shadow: false, color: 'white', opacity: 0.85, fontsize: 0.045, motion: 'none' },
-  { id: 'runway', label: 'Runway', text: 'Runway', position: 'bottom-left', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.04, motion: 'none' },
+  { id: 'veo', label: 'Veo', text: 'Veo', position: 'bottom-right', motion: 'random', sparkle: false, glow: false, shadow: false, color: 'white', opacity: 0.9, fontsize: 0.04,
+    note: 'Veo 3: chữ "veo" mờ, NHẢY giữa các góc & giữa khung để chống cắt (gốc ở dưới-phải). Nguồn: hỗ trợ Google, BGR, Berkeley iSchool.' },
+  { id: 'sora', label: 'Sora', text: 'Sora', position: 'bottom-right', motion: 'bounce', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.9, fontsize: 0.05,
+    note: 'Sora 2: logo đám mây + chữ, NẢY quanh góc dưới-phải để chống xoá 1 khung. Nguồn: OpenAI, đánh giá Sora 2.' },
+  { id: 'capcut', label: 'CapCut', text: 'CapCut', position: 'bottom-right', motion: 'none', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.92, fontsize: 0.05,
+    note: 'CapCut: chữ trắng CapCut tĩnh (watermark chính là clip cuối video). Nguồn: capcut.com & nhiều hướng dẫn.' },
+  { id: 'tiktok', label: 'TikTok', text: '@username', position: 'bottom-right', motion: 'bounce', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.045,
+    note: 'TikTok: logo + @username DI CHUYỂN/nảy trong khung (thường bắt đầu góc dưới-phải). Nguồn: Hootsuite & các bài gỡ watermark.' },
+  { id: 'kling', label: 'Kling AI', text: 'Kling AI', position: 'bottom-right', motion: 'none', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.04,
+    note: 'Kling AI: logo + chữ tĩnh ở góc dưới. Nguồn: nhiều hướng dẫn gỡ watermark Kling.' },
+  { id: 'pika', label: 'Pika', text: 'Pika', position: 'bottom-right', motion: 'none', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.045,
+    note: 'Pika: logo/chữ mờ tĩnh ở góc dưới-phải (bản free). Nguồn: pika.art FAQ & nhiều nguồn.' },
+  { id: 'runway', label: 'Runway', text: 'Runway', position: 'bottom-right', motion: 'none', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.04,
+    note: 'Runway: logo tĩnh "ở góc" trên bản free — nguồn KHÔNG nêu rõ góc nào (độ tin cậy thấp); tạm để dưới-phải, chỉnh thêm nếu cần.' },
 ];
 
 // Offscreen canvas used only to measure text width (replicates Pillow's tile math).
@@ -130,7 +140,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const canvasRef = useRef(null);
   const frameCanvasRef = useRef(null); // hidden full-res frame buffer
   const logoImgRef = useRef(null);
-  const draggingRef = useRef(false);
+  const dragRef = useRef(null); // null | 'move' | 'resize:text' | 'resize:logo'
   const loadSeqRef = useRef(0); // monotonic id so out-of-order frame loads are dropped
   const busy = status === 'processing';
   const placeable = motion === 'none' && !tile; // position only matters when static & not tiled
@@ -261,14 +271,35 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       }
     }
 
-    // Selection rectangle around the primary box (only when placement applies).
+    // Selection box(es) (only when placement applies). In custom (pinned) mode
+    // each present element gets its own dashed box + bottom-right resize handle,
+    // so the user can resize the logo and the text independently. In preset mode
+    // we draw just a guide box (no handle); a click pins it (-> custom) first.
     if (placeable && lay.primary) {
-      const [bx, by] = anchorOf(lay.primary.w, lay.primary.h);
       ctx.save();
-      ctx.strokeStyle = usePin ? 'rgba(99,102,241,0.95)' : 'rgba(255,255,255,0.7)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 4]);
-      ctx.strokeRect(bx * s + 0.5, by * s + 0.5, lay.primary.w * s, lay.primary.h * s);
+      const drawBox = (box, x, y, withHandle, pinned) => {
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = pinned ? 'rgba(99,102,241,0.95)' : 'rgba(255,255,255,0.7)';
+        ctx.strokeRect(x * s + 0.5, y * s + 0.5, box.w * s, box.h * s);
+        if (withHandle) {
+          const hx = (x + box.w) * s, hy = (y + box.h) * s;
+          ctx.setLineDash([]);
+          ctx.fillStyle = 'rgba(99,102,241,0.95)';
+          ctx.fillRect(hx - 5, hy - 5, 10, 10);
+          ctx.strokeStyle = 'white';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(hx - 5, hy - 5, 10, 10);
+        }
+      };
+      if (usePin) {
+        // both elements share the pinned top-left (matches backend custom_xy)
+        if (lay.logo) drawBox(lay.logo, customXY[0], customXY[1], true, true);
+        if (lay.text) drawBox(lay.text, customXY[0], customXY[1], true, true);
+      } else {
+        const [bx, by] = anchorOf(lay.primary.w, lay.primary.h);
+        drawBox(lay.primary, bx, by, false, false);
+      }
       ctx.restore();
     }
   }, [frame, layout, position, customXY, opacity, color, text, fontsize, sparkle, glow, shadow, tile, placeable, logoDims]);
@@ -294,14 +325,73 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     setCustomXY([x, y]);
   }, [frame, layout]);
 
+  // Which element's bottom-right resize handle (if any) is under the pointer.
+  // Handles exist ONLY in custom (pinned) mode, so a handle grab never converts
+  // a preset into custom — the box is already pinned. Returns 'text'|'logo'|null.
+  const handleHit = (clientX, clientY) => {
+    const cv = canvasRef.current;
+    if (!cv || !frame || !customXY || !placeable) return null;
+    const VW = frame.width;
+    const rect = cv.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const s = cv.width / VW;
+    const lay = layout(VW, frame.height);
+    const near = (box) => {
+      const hx = rect.left + (customXY[0] + box.w) * s * (rect.width / cv.width);
+      const hy = rect.top + (customXY[1] + box.h) * s * (rect.height / cv.height);
+      return Math.hypot(clientX - hx, clientY - hy) <= HANDLE;
+    };
+    if (lay.text && near(lay.text)) return 'text';     // text drawn on top -> test first
+    if (lay.logo && near(lay.logo)) return 'logo';
+    return null;
+  };
+
+  // Resize one element by dragging its handle: text -> fontsize, logo -> logoScale.
+  // Grows from the pinned top-left and is clamped so the box stays inside the
+  // frame (handle stays grabbable; nothing renders/exports off-screen).
+  const resizeAt = useCallback((clientX, clientY, el) => {
+    const cv = canvasRef.current;
+    if (!cv || !frame || !customXY) return;
+    const VW = frame.width, VH = frame.height;
+    const lay = layout(VW, VH);
+    const rect = cv.getBoundingClientRect();
+    if (!rect.width) return;
+    const s = cv.width / VW;
+    const pxVid = ((clientX - rect.left) * (cv.width / rect.width)) / s;
+    const wBudget = Math.max(8, VW - customXY[0]); // keep box right edge <= VW
+    const hBudget = Math.max(8, VH - customXY[1]); // keep box bottom edge <= VH
+    if (el === 'text' && lay.text) {
+      const box = lay.text;
+      // box dims are ~linear in font size; cap the ratio by both budgets.
+      const ratio = Math.min((pxVid - customXY[0]) / box.w, wBudget / box.w, hBudget / box.h);
+      setFontsize(clamp(snap(fontsize * ratio, 0.005), 0.02, 0.15));
+    } else if (el === 'logo' && lay.logo && logoDims) {
+      let targetW = clamp(pxVid - customXY[0], 8, wBudget);
+      const lh = logoDims.h * targetW / logoDims.w; // honor aspect for the height budget
+      if (lh > hBudget) targetW = hBudget * logoDims.w / logoDims.h;
+      setLogoScale(clamp(snap(targetW / VW, 0.01), 0.05, 0.5)); // logo width = VW * scale
+    }
+  }, [frame, layout, customXY, fontsize, logoDims]);
+
   const onPointerDown = (e) => {
     if (!interactive) return; // interactive already excludes tile/motion
-    draggingRef.current = true;
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    const hit = handleHit(e.clientX, e.clientY); // 'text'|'logo'|null (custom mode only)
+    if (hit) { dragRef.current = 'resize:' + hit; return; }
+    dragRef.current = 'move';
     placeAt(e.clientX, e.clientY);
   };
-  const onPointerMove = (e) => { if (draggingRef.current) placeAt(e.clientX, e.clientY); };
-  const endDrag = () => { draggingRef.current = false; };
+  const onPointerMove = (e) => {
+    const mode = dragRef.current;
+    if (mode === 'move') { placeAt(e.clientX, e.clientY); return; }
+    if (mode && mode.startsWith('resize:')) { resizeAt(e.clientX, e.clientY, mode.slice(7)); return; }
+    // hover cursor hint (no React state -> no re-render)
+    if (interactive) {
+      const cv = canvasRef.current;
+      if (cv) cv.style.cursor = handleHit(e.clientX, e.clientY) ? 'nwse-resize' : 'crosshair';
+    }
+  };
+  const endDrag = () => { dragRef.current = null; };
 
   // Keyboard placement (accessibility): arrow keys nudge the custom position,
   // Shift = bigger step. Seeds from the centered point if none pinned yet.
@@ -465,9 +555,9 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
             {tile ? 'Chế độ lưới chéo phủ toàn khung — không chọn vị trí.'
               : motion !== 'none' ? 'Đang bật chuyển động — watermark sẽ di chuyển khi xuất; vị trí cố định bị bỏ qua.'
-              : customXY ? `Vị trí tuỳ chỉnh: x=${customXY[0]}, y=${customXY[1]} (bấm/kéo hoặc phím mũi tên để đổi).`
+              : customXY ? `Vị trí tuỳ chỉnh: x=${customXY[0]}, y=${customXY[1]}. Kéo (hoặc phím mũi tên) để di chuyển; kéo ô vuông ở góc mỗi khung (chữ/logo) để đổi kích thước.`
               : position === 'random' ? 'Vị trí ngẫu nhiên — đổi mỗi lần xuất (ô minh hoạ ở giữa).'
-              : 'Bấm/kéo trên khung (hoặc phím mũi tên) để đặt vị trí tuỳ ý.'}
+              : 'Bấm để ghim vị trí (sau đó kéo ô vuông ở góc để đổi kích thước chữ/logo), hoặc chỉnh bằng thanh trượt bên dưới.'}
           </Typography>
           <Box sx={{ mt: 1 }}>
             <Typography variant="caption" color="text.secondary">
@@ -483,15 +573,22 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       <Stack spacing={2}>
         <Box>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-            Mẫu thương hiệu (áp nhanh vị trí + kiểu)
+            Mẫu thương hiệu — vị trí theo watermark thật của từng nền tảng (di chuột để xem nguồn)
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
             {BRANDS.map((b) => (
-              <Button key={b.id} size="small" variant="outlined" onClick={() => applyBrand(b)} disabled={busy}>
-                {b.label}
-              </Button>
+              <Tooltip key={b.id} title={b.note} arrow>
+                <span>
+                  <Button size="small" variant="outlined" onClick={() => applyBrand(b)} disabled={busy}>
+                    {b.label}
+                  </Button>
+                </span>
+              </Tooltip>
             ))}
           </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+            Veo · Sora · TikTok có watermark <b>di chuyển</b> — góc chỉ là điểm bắt đầu, chuyển động sẽ đè lên vị trí cố định.
+          </Typography>
         </Box>
 
         <TextField label="Chữ watermark" size="small" fullWidth value={text}
@@ -528,7 +625,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
             onChange={(_, v) => setOpacity(v)} />
         </Box>
         <Box>
-          <Typography variant="caption" color="text.secondary">Cỡ chữ (theo chiều cao video): {fontsize.toFixed(2)}</Typography>
+          <Typography variant="caption" color="text.secondary">Cỡ / độ rộng chữ (hoặc kéo ô vuông của khung chữ khi đã ghim vị trí): {fontsize.toFixed(3)}</Typography>
           <Slider size="small" min={0.02} max={0.15} step={0.005} value={fontsize} disabled={busy}
             onChange={(_, v) => setFontsize(v)} />
         </Box>
@@ -557,7 +654,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         </Stack>
         {logoFile && (
           <Box>
-            <Typography variant="caption" color="text.secondary">Cỡ logo (theo bề ngang): {logoScale.toFixed(2)}</Typography>
+            <Typography variant="caption" color="text.secondary">Độ rộng logo (theo bề ngang video; hoặc kéo ô vuông của khung logo khi đã ghim vị trí): {logoScale.toFixed(2)}</Typography>
             <Slider size="small" min={0.05} max={0.5} step={0.01} value={logoScale} disabled={busy} onChange={(_, v) => setLogoScale(v)} />
           </Box>
         )}
