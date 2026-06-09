@@ -535,13 +535,22 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
                 ImageColor.getrgb(opts["color"])
             except Exception:
                 raise RuntimeError(f"Màu không hợp lệ: {opts.get('color')}")
+        # Outline (stroke) colour is secondary — fall back to black on an invalid
+        # value rather than failing the whole job.
+        if opts.get("stroke_width") and opts.get("stroke_color"):
+            try:
+                from PIL import ImageColor
+                ImageColor.getrgb(opts["stroke_color"])
+            except Exception:
+                opts["stroke_color"] = "black"
         text = None
         if opts.get("text"):
             text = W.TextSpec(
                 text=opts["text"], color=opts.get("color", "white"),
                 font=opts.get("font") or "arial.ttf",
                 opacity=opts.get("opacity", 0.5), fontsize_ratio=opts.get("fontsize_ratio", 0.05),
-                stroke_width=opts.get("stroke_width", 0), shadow=opts.get("shadow", False),
+                stroke_width=opts.get("stroke_width", 0) or 0,
+                stroke_color=opts.get("stroke_color", "black"), shadow=opts.get("shadow", False),
                 rotate=opts.get("rotate", 0.0), tile=opts.get("tile", False),
                 sparkle=opts.get("sparkle", False), glow=opts.get("glow", False),
             )
@@ -607,7 +616,8 @@ async def add_watermark(
     text: str = Form(""), color: str = Form("white"), opacity: str = Form("0.5"),
     position: str = Form("bottom-right"), fontsize_ratio: str = Form("0.05"),
     font: str = Form("arial.ttf"), custom_x: str = Form(""), custom_y: str = Form(""),
-    stroke_width: str = Form("0"), shadow: str = Form("0"), rotate: str = Form("0"),
+    stroke_width: str = Form("0"), stroke_color: str = Form("black"),
+    shadow: str = Form("0"), rotate: str = Form("0"),
     tile: str = Form("0"), sparkle: str = Form("0"), glow: str = Form("0"),
     motion: str = Form("none"), motion_interval: str = Form("3"), seed: str = Form(""),
     logo_scale: str = Form("0.15"), logo_opacity: str = Form("1.0"),
@@ -639,7 +649,8 @@ async def add_watermark(
         "text": text.strip(), "color": color or "white", "opacity": _as_float(opacity, 0.5),
         "position": position or "bottom-right", "fontsize_ratio": _as_float(fontsize_ratio, 0.05),
         "font": _safe_font(font), "custom_x": _as_int(custom_x), "custom_y": _as_int(custom_y),
-        "stroke_width": _as_int(stroke_width, 0) or 0, "shadow": _as_bool(shadow),
+        "stroke_width": _as_int(stroke_width, 0) or 0, "stroke_color": stroke_color or "black",
+        "shadow": _as_bool(shadow),
         "rotate": _as_float(rotate, 0.0), "tile": _as_bool(tile),
         "sparkle": _as_bool(sparkle), "glow": _as_bool(glow),
         "motion": motion or "none", "motion_interval": _as_float(motion_interval, 3.0),

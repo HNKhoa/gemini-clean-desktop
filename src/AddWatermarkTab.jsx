@@ -62,14 +62,40 @@ const FONTS = [
 ];
 const fontDefOf = (fileTok) => FONTS.find((f) => f.file === fileTok) || FONTS[0];
 
-// Offscreen canvas used only to measure text width (replicates Pillow's tile math).
+// Offscreen canvas used to measure text width (replicates Pillow's tile math)
+// and to normalise any CSS colour (name / rgb() / hex) to "#rrggbb".
 const _mcv = typeof document !== 'undefined' ? document.createElement('canvas') : null;
 const _mctx = _mcv ? _mcv.getContext('2d') : null;
 
+// Normalise a CSS colour to #rrggbb (via the canvas fillStyle getter), or null
+// if invalid. Two sentinels so an invalid string can't masquerade as one of them:
+// a valid colour resolves identically from both, an invalid one leaves each
+// sentinel untouched (so they differ). Used for <input type="color"> + outline.
+function cssToHex(c) {
+  if (!_mctx || !c) return null;
+  _mctx.fillStyle = '#000000'; _mctx.fillStyle = c; const a = _mctx.fillStyle;
+  _mctx.fillStyle = '#ffffff'; _mctx.fillStyle = c; const b = _mctx.fillStyle;
+  if (a !== b) return null;             // didn't take in at least one case -> invalid
+  return /^#[0-9a-f]{6}$/i.test(a) ? a : null;
+}
+
+// Relative luminance (0..1) of a #rrggbb colour — to choose a contrasting outline.
+function hexLuminance(hex) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
+  if (!m) return 1;
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16) / 255);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+const QUICK_COLORS = ['#ffffff', '#000000', '#ff3b30', '#ffcc00', '#34c759', '#0a84ff', '#ff2d55'];
+
 // Size of the rendered text tile in VIDEO pixels — mirrors
 // VisibleWatermarker._render_text_tile so the preview box matches the export.
-function textTileBox(VH, { text, fontsize, sparkle, glow, shadow, fontCss = 'Arial', fontWeight = 'normal' }) {
+// `outline` is the stroke width as a fraction of font size (0 = none). Must match
+// the stroke_width px the UI sends to the backend (see strokePxFor()).
+function textTileBox(VH, { text, fontsize, sparkle, glow, shadow, outline = 0, fontCss = 'Arial', fontWeight = 'normal' }) {
   const size = Math.max(8, Math.floor(VH * fontsize));
+  const stroke = strokePxFor(size, outline);
   let tw = 0, th = 0;
   if (_mctx) {
     _mctx.font = `${fontWeight} ${size}px "${fontCss}", sans-serif`;
@@ -78,17 +104,23 @@ function textTileBox(VH, { text, fontsize, sparkle, glow, shadow, fontCss = 'Ari
     th = Math.round((m.actualBoundingBoxAscent || 0) + (m.actualBoundingBoxDescent || 0));
   }
   if (!th) th = Math.round(size * 0.8);
+  // Pillow's textbbox(stroke_width=sw) expands the glyph box by sw on each side.
+  tw += 2 * stroke;
+  th += 2 * stroke;
   const spark = sparkle ? Math.floor(size * 0.95) : 0;
   const sparkGap = sparkle ? Math.max(4, Math.floor(size / 5)) : 0;
-  // Backend pad = stroke_width + max(4, …). This UI never sends a stroke today,
-  // but keep the term so the preview stays faithful if a stroke control is added.
-  const stroke = 0;
-  const pad = stroke + Math.max(4, (glow || sparkle) ? Math.floor(size / 5) : 4);
+  const pad = stroke + Math.max(4, (glow || sparkle) ? Math.floor(size / 5) : 4); // backend: pad = stroke_width + base
   const sh = shadow ? 2 : 0;
   const contentH = Math.max(th, spark);
   const w = spark + sparkGap + tw + 2 * pad + sh;
   const h = contentH + 2 * pad + sh;
-  return { w, h, size, spark, sparkGap, pad, th };
+  return { w, h, size, spark, sparkGap, pad, th, stroke };
+}
+
+// Stroke width in px for a given font size + outline fraction. Single source of
+// truth so the preview metrics and the backend stroke_width stay identical.
+function strokePxFor(sizePx, outline) {
+  return outline > 0 ? Math.max(1, Math.round(sizePx * outline)) : 0;
 }
 
 // Top-left anchor (video px) of a box of (bw, bh) for a preset position.
@@ -129,6 +161,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const [opacity, setOpacity] = useState(0.6);
   const [fontsize, setFontsize] = useState(0.05);
   const [font, setFont] = useState('arial');
+  const [outlineWidth, setOutlineWidth] = useState(0); // viền chữ: 0 = tắt, else fraction of size
   const [logoScale, setLogoScale] = useState(0.15);
   const [tile, setTile] = useState(false);
   const [sparkle, setSparkle] = useState(false);
@@ -167,6 +200,9 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const placeable = motion === 'none' && !tile; // position only matters when static & not tiled
   const interactive = !!frame && !busy && placeable;
   const fontDef = fontDefOf(font); // {css, weight} for the live preview
+  const colorHex = cssToHex(color) || '#ffffff'; // normalized for the RGB picker
+  // Auto outline colour: contrast against the fill (dark text -> white outline).
+  const outlineColor = hexLuminance(colorHex) > 0.5 ? '#000000' : '#ffffff';
 
   useEffect(() => { getWmStatus().then((s) => setAvailable(!!(s && s.available === true))).catch(() => setAvailable(false)); }, []);
 
@@ -218,7 +254,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   // ── Layout helpers (video px) ───────────────────────────────────────────────
   const layout = useCallback((VW, VH) => {
     const out = {};
-    if (text.trim()) out.text = textTileBox(VH, { text, fontsize, sparkle, glow, shadow, fontCss: fontDef.css, fontWeight: fontDef.weight });
+    if (text.trim()) out.text = textTileBox(VH, { text, fontsize, sparkle, glow, shadow, outline: outlineWidth, fontCss: fontDef.css, fontWeight: fontDef.weight });
     if (logoImgRef.current && logoDims && logoDims.w > 0 && logoDims.h > 0) {
       let lw = Math.max(2, Math.round(VW * logoScale));
       lw -= lw % 2;
@@ -227,7 +263,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     }
     out.primary = out.text || out.logo || null;
     return out;
-  }, [text, fontsize, sparkle, glow, shadow, logoScale, logoDims, fontDef.css, fontDef.weight]);
+  }, [text, fontsize, sparkle, glow, shadow, outlineWidth, logoScale, logoDims, fontDef.css, fontDef.weight]);
 
   // ── Preview draw ────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -274,6 +310,12 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         const cy = (y + b.h / 2) * s;
         if (b.spark) drawSparkle(ctx, (x + b.pad + b.spark / 2) * s, cy, b.spark * s, color);
         const tx = (x + b.pad + b.spark + b.sparkGap) * s;
+        if (b.stroke > 0) { // outline first, fill on top (paint-order stroke->fill)
+          ctx.lineWidth = b.stroke * 2 * s;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = outlineColor;
+          try { ctx.strokeText(text, tx, cy); } catch (_) { /* ignore */ }
+        }
         ctx.fillStyle = color;
         try { ctx.fillText(text, tx, cy); } catch (_) { /* invalid color → skip */ }
         ctx.restore();
@@ -324,7 +366,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       }
       ctx.restore();
     }
-  }, [frame, layout, position, customXY, opacity, color, text, fontsize, sparkle, glow, shadow, tile, placeable, logoDims, fontDef.css, fontDef.weight]);
+  }, [frame, layout, position, customXY, opacity, color, outlineColor, text, fontsize, sparkle, glow, shadow, tile, placeable, logoDims, fontDef.css, fontDef.weight]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -485,10 +527,15 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       // and tile mode make the backend ignore position/custom_xy entirely.
       const useCustom = !!customXY && placeable;
       const effPos = useCustom ? 'custom' : position;
+      // Outline width in px from the export's video height (== preview frame
+      // height), using the same formula as the preview so they match exactly.
+      const sizePx = Math.max(8, Math.floor((frame ? frame.height : 1080) * fontsize));
+      const strokeW = strokePxFor(sizePx, outlineWidth);
       const opts = {
         text: text.trim(), color, opacity, position: effPos, font,
         custom_x: useCustom ? customXY[0] : '', custom_y: useCustom ? customXY[1] : '',
-        fontsize_ratio: fontsize, shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
+        fontsize_ratio: fontsize, stroke_width: strokeW, stroke_color: outlineColor,
+        shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
         logo_scale: logoScale, logo_opacity: 1.0, crf, preset: 'medium',
         hidden, password, payload,
       };
@@ -651,8 +698,29 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
               <MenuItem value="bounce">Nảy (DVD)</MenuItem>
             </Select>
           </FormControl>
-          <TextField label="Màu" size="small" sx={{ width: 130 }} value={color}
-            onChange={(e) => setColor(e.target.value)} placeholder="white / #ff0000" disabled={busy} />
+        </Stack>
+
+        {/* Màu chữ — bảng màu RGB */}
+        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>Màu chữ</Typography>
+          <Tooltip title="Mở bảng màu RGB">
+            <Box component="label" sx={{ display: 'inline-flex', cursor: busy ? 'default' : 'pointer' }}>
+              <input type="color" value={colorHex} disabled={busy}
+                onChange={(e) => setColor(e.target.value)}
+                style={{ width: 40, height: 32, border: '1px solid #888', borderRadius: 6,
+                  background: 'none', padding: 0, cursor: busy ? 'default' : 'pointer' }} />
+            </Box>
+          </Tooltip>
+          <TextField size="small" sx={{ width: 130 }} value={color} disabled={busy}
+            onChange={(e) => setColor(e.target.value)} placeholder="white / #ff0000"
+            helperText="tên hoặc mã hex" />
+          {QUICK_COLORS.map((c) => (
+            <Box key={c} component="button" type="button" disabled={busy}
+              onClick={() => setColor(c)} aria-label={`Màu ${c}`}
+              sx={{ width: 22, height: 22, borderRadius: '50%', p: 0, cursor: 'pointer',
+                bgcolor: c, border: colorHex.toLowerCase() === c ? '2px solid' : '1px solid',
+                borderColor: colorHex.toLowerCase() === c ? 'primary.main' : 'divider' }} />
+          ))}
         </Stack>
 
         <Box>
@@ -664,6 +732,13 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           <Typography variant="caption" color="text.secondary">Cỡ / độ rộng chữ (hoặc kéo ô vuông của khung chữ khi đã ghim vị trí): {fontsize.toFixed(3)}</Typography>
           <Slider size="small" min={0.02} max={0.15} step={0.005} value={fontsize} disabled={busy}
             onChange={(_, v) => setFontsize(v)} />
+        </Box>
+        <Box>
+          <Typography variant="caption" color="text.secondary">
+            Viền chữ (giúp chữ nét &amp; nổi rõ hơn): {outlineWidth === 0 ? 'tắt' : outlineWidth.toFixed(3)}
+          </Typography>
+          <Slider size="small" min={0} max={0.15} step={0.005} value={outlineWidth} disabled={busy}
+            onChange={(_, v) => setOutlineWidth(v)} />
         </Box>
 
         <Stack direction="row" sx={{ flexWrap: 'wrap' }}>
@@ -679,12 +754,13 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           </Button>
           {logoFile && <Button size="small" color="inherit" onClick={() => setLogoFile(null)} disabled={busy}>Bỏ logo</Button>}
           <input ref={logoRef} type="file" hidden accept="image/png,image/webp,image/jpeg" onChange={pickLogo} />
-          <FormControl size="small" sx={{ minWidth: 150 }} disabled={busy}>
+          <FormControl size="small" sx={{ minWidth: 190 }} disabled={busy}>
             <InputLabel id="q">Chất lượng</InputLabel>
             <Select labelId="q" label="Chất lượng" value={crf} onChange={(e) => setCrf(e.target.value)}>
               <MenuItem value={23}>Nhẹ (CRF 23)</MenuItem>
               <MenuItem value={20}>Tiêu chuẩn (CRF 20)</MenuItem>
               <MenuItem value={18}>Cao (CRF 18)</MenuItem>
+              <MenuItem value={14}>Rất cao – chữ nét nhất (CRF 14)</MenuItem>
             </Select>
           </FormControl>
         </Stack>
