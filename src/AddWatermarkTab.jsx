@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Box, Paper, Stack, Typography, Button, IconButton, Tooltip, TextField, Select, MenuItem,
   FormControl, InputLabel, Slider, Switch, FormControlLabel, LinearProgress, Chip, Divider, Collapse,
@@ -10,15 +10,91 @@ import StopIcon from '@mui/icons-material/Stop';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
-import { apiFetch, addWatermark, getWmStatus } from './engine.js';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import { apiFetch, addWatermark, getWmStatus, grabPreviewFrame } from './engine.js';
 
 const isVideo = (f) => /^video\/(mp4|quicktime)$/.test(f.type) || /\.(mp4|mov|m4v)$/i.test(f.name);
+
+// Must match geometry.compute_xy default margin in backend/watermark/geometry.py.
+const MARGIN = 24;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Brand placement/style templates. These approximate where each platform
+// typically stamps its watermark — a starting point the user can fine-tune via
+// the preview. Text stays editable (e.g. TikTok's @username).
+const BRANDS = [
+  { id: 'veo', label: 'Veo', text: 'Veo', position: 'bottom-left', sparkle: true, glow: true, shadow: false, color: 'white', opacity: 0.95, fontsize: 0.045, motion: 'none' },
+  { id: 'sora', label: 'Sora', text: 'Sora', position: 'bottom-right', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.9, fontsize: 0.05, motion: 'bounce' },
+  { id: 'capcut', label: 'CapCut', text: 'CapCut', position: 'top-right', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.92, fontsize: 0.05, motion: 'none' },
+  { id: 'tiktok', label: 'TikTok', text: '@username', position: 'top-left', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.045, motion: 'random' },
+  { id: 'kling', label: 'Kling AI', text: 'KLING AI', position: 'bottom-right', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.04, motion: 'none' },
+  { id: 'pika', label: 'Pika', text: 'Pika', position: 'bottom-left', sparkle: false, glow: true, shadow: false, color: 'white', opacity: 0.85, fontsize: 0.045, motion: 'none' },
+  { id: 'runway', label: 'Runway', text: 'Runway', position: 'bottom-left', sparkle: false, glow: false, shadow: true, color: 'white', opacity: 0.85, fontsize: 0.04, motion: 'none' },
+];
+
+// Offscreen canvas used only to measure text width (replicates Pillow's tile math).
+const _mcv = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+const _mctx = _mcv ? _mcv.getContext('2d') : null;
+
+// Size of the rendered text tile in VIDEO pixels — mirrors
+// VisibleWatermarker._render_text_tile so the preview box matches the export.
+function textTileBox(VH, { text, fontsize, sparkle, glow, shadow }) {
+  const size = Math.max(8, Math.floor(VH * fontsize));
+  let tw = 0, th = 0;
+  if (_mctx) {
+    _mctx.font = `${size}px Arial, sans-serif`;
+    const m = _mctx.measureText(text || ' ');
+    tw = Math.ceil(m.width);
+    th = Math.round((m.actualBoundingBoxAscent || 0) + (m.actualBoundingBoxDescent || 0));
+  }
+  if (!th) th = Math.round(size * 0.8);
+  const spark = sparkle ? Math.floor(size * 0.95) : 0;
+  const sparkGap = sparkle ? Math.max(4, Math.floor(size / 5)) : 0;
+  // Backend pad = stroke_width + max(4, …). This UI never sends a stroke today,
+  // but keep the term so the preview stays faithful if a stroke control is added.
+  const stroke = 0;
+  const pad = stroke + Math.max(4, (glow || sparkle) ? Math.floor(size / 5) : 4);
+  const sh = shadow ? 2 : 0;
+  const contentH = Math.max(th, spark);
+  const w = spark + sparkGap + tw + 2 * pad + sh;
+  const h = contentH + 2 * pad + sh;
+  return { w, h, size, spark, sparkGap, pad, th };
+}
+
+// Top-left anchor (video px) of a box of (bw, bh) for a preset position.
+function presetAnchor(position, VW, VH, bw, bh) {
+  switch (position) {
+    case 'top-left': return [MARGIN, MARGIN];
+    case 'top-right': return [VW - bw - MARGIN, MARGIN];
+    case 'bottom-left': return [MARGIN, VH - bh - MARGIN];
+    case 'center': return [(VW - bw) / 2, (VH - bh) / 2];
+    case 'random': return [(VW - bw) / 2, (VH - bh) / 2]; // representative sample
+    case 'bottom-right':
+    default: return [VW - bw - MARGIN, VH - bh - MARGIN];
+  }
+}
+
+function drawSparkle(ctx, cx, cy, size, color) {
+  const r = size / 2, inner = r * 0.2;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) {
+    const ao = (90 * i - 90) * Math.PI / 180;
+    const ax = cx + r * Math.cos(ao), ay = cy + r * Math.sin(ao);
+    if (i === 0) ctx.moveTo(ax, ay); else ctx.lineTo(ax, ay);
+    const ai = (90 * i - 90 + 45) * Math.PI / 180;
+    ctx.lineTo(cx + inner * Math.cos(ai), cy + inner * Math.sin(ai));
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
 
 export default function AddWatermarkTab({ outputDir, onToast }) {
   const [file, setFile] = useState(null);
   const [logoFile, setLogoFile] = useState(null);
   const [text, setText] = useState('© 2026');
   const [position, setPosition] = useState('bottom-right');
+  const [customXY, setCustomXY] = useState(null); // [x, y] video px (top-left) | null
   const [color, setColor] = useState('white');
   const [opacity, setOpacity] = useState(0.6);
   const [fontsize, setFontsize] = useState(0.05);
@@ -41,20 +117,249 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const [hiddenBytes, setHiddenBytes] = useState(null);
   const [available, setAvailable] = useState(true);
 
+  // Preview state
+  const [frame, setFrame] = useState(null); // { width, height } of the loaded frame
+  const [previewFrac, setPreviewFrac] = useState(0.5);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewErr, setPreviewErr] = useState('');
+  const [logoDims, setLogoDims] = useState(null); // { w, h } natural size
+
   const fileRef = useRef(null);
   const logoRef = useRef(null);
   const abortRef = useRef(null);
+  const canvasRef = useRef(null);
+  const frameCanvasRef = useRef(null); // hidden full-res frame buffer
+  const logoImgRef = useRef(null);
+  const draggingRef = useRef(false);
+  const loadSeqRef = useRef(0); // monotonic id so out-of-order frame loads are dropped
   const busy = status === 'processing';
+  const placeable = motion === 'none' && !tile; // position only matters when static & not tiled
+  const interactive = !!frame && !busy && placeable;
 
   useEffect(() => { getWmStatus().then((s) => setAvailable(!!(s && s.available === true))).catch(() => setAvailable(false)); }, []);
+
+  // ── Frame loading ─────────────────────────────────────────────────────────
+  const loadFrame = useCallback(async (f, frac) => {
+    const seq = ++loadSeqRef.current; // claim latest synchronously; stale loads bail
+    if (!f) { setFrame(null); return; }
+    setPreviewBusy(true); setPreviewErr('');
+    try {
+      const img = await grabPreviewFrame(f, frac);
+      if (seq !== loadSeqRef.current) return; // superseded by a newer request
+      let fc = frameCanvasRef.current;
+      if (!fc) { fc = document.createElement('canvas'); frameCanvasRef.current = fc; }
+      fc.width = img.width; fc.height = img.height;
+      fc.getContext('2d').putImageData(img, 0, 0);
+      setFrame({ width: img.width, height: img.height });
+    } catch (_) {
+      if (seq === loadSeqRef.current) { setFrame(null); setPreviewErr('Không tạo được khung xem trước cho video này'); }
+    } finally {
+      if (seq === loadSeqRef.current) setPreviewBusy(false);
+    }
+  }, []);
+
+  // Reload preview whenever the file changes (resets the frame position to mid).
+  useEffect(() => {
+    setPreviewFrac(0.5);
+    loadFrame(file, 0.5);
+  }, [file, loadFrame]);
+
+  // Load the logo's natural size for a faithful preview + draw.
+  useEffect(() => {
+    if (!logoFile) { logoImgRef.current = null; setLogoDims(null); return; }
+    const url = URL.createObjectURL(logoFile);
+    const img = new Image();
+    img.onload = () => {
+      // Some loadable images (0×0, certain SVGs, truncated files) fire onload
+      // with zero dimensions — reject them to avoid a divide-by-zero NaN box.
+      if (!img.naturalWidth || !img.naturalHeight) {
+        logoImgRef.current = null; setLogoDims(null); onToast?.('Logo không hợp lệ (kích thước 0)');
+        return;
+      }
+      logoImgRef.current = img; setLogoDims({ w: img.naturalWidth, h: img.naturalHeight });
+    };
+    img.onerror = () => { logoImgRef.current = null; setLogoDims(null); };
+    img.src = url;
+    return () => { URL.revokeObjectURL(url); };
+  }, [logoFile]);
+
+  // ── Layout helpers (video px) ───────────────────────────────────────────────
+  const layout = useCallback((VW, VH) => {
+    const out = {};
+    if (text.trim()) out.text = textTileBox(VH, { text, fontsize, sparkle, glow, shadow });
+    if (logoImgRef.current && logoDims && logoDims.w > 0 && logoDims.h > 0) {
+      let lw = Math.max(2, Math.round(VW * logoScale));
+      lw -= lw % 2;
+      const lh = Math.max(1, Math.round(logoDims.h * lw / logoDims.w));
+      out.logo = { w: lw, h: lh };
+    }
+    out.primary = out.text || out.logo || null;
+    return out;
+  }, [text, fontsize, sparkle, glow, shadow, logoScale, logoDims]);
+
+  // ── Preview draw ────────────────────────────────────────────────────────────
+  const draw = useCallback(() => {
+    const cv = canvasRef.current;
+    const fc = frameCanvasRef.current;
+    if (!cv) return;
+    const ctx = cv.getContext('2d');
+    if (!frame || !fc) { ctx.clearRect(0, 0, cv.width, cv.height); return; }
+    const VW = frame.width, VH = frame.height;
+    const maxW = 680, maxH = 440;
+    let dispW = maxW, dispH = Math.round(maxW * VH / VW);
+    if (dispH > maxH) { dispH = maxH; dispW = Math.round(maxH * VW / VH); }
+    cv.width = dispW; cv.height = dispH;
+    cv.style.maxWidth = dispW + 'px';
+    const s = dispW / VW;
+    ctx.drawImage(fc, 0, 0, VW, VH, 0, 0, dispW, dispH);
+
+    const lay = layout(VW, VH);
+    // A pin only governs placement when static & not tiled; otherwise show a
+    // neutral centered sample (motion/random) since the export won't honor it.
+    const usePin = !!customXY && placeable;
+    const anchorOf = (bw, bh) => (usePin
+      ? [customXY[0], customXY[1]]
+      : presetAnchor(placeable ? position : 'center', VW, VH, bw, bh));
+
+    // Logo first (drawn under text, matching the overlay stacking order).
+    if (lay.logo && logoImgRef.current) {
+      const [lx, ly] = anchorOf(lay.logo.w, lay.logo.h);
+      ctx.save();
+      ctx.globalAlpha = 1.0;
+      ctx.drawImage(logoImgRef.current, lx * s, ly * s, lay.logo.w * s, lay.logo.h * s);
+      ctx.restore();
+    }
+
+    if (lay.text) {
+      const b = lay.text;
+      const drawOneText = (x, y) => {
+        ctx.save();
+        ctx.globalAlpha = clamp(opacity, 0, 1);
+        ctx.font = `${b.size * s}px Arial, sans-serif`;
+        ctx.textBaseline = 'middle';
+        if (glow) { ctx.shadowColor = 'rgba(255,255,255,0.95)'; ctx.shadowBlur = b.size * 0.18 * s * 2; }
+        else if (shadow) { ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowOffsetX = 2 * s; ctx.shadowOffsetY = 2 * s; }
+        const cy = (y + b.h / 2) * s;
+        if (b.spark) drawSparkle(ctx, (x + b.pad + b.spark / 2) * s, cy, b.spark * s, color);
+        const tx = (x + b.pad + b.spark + b.sparkGap) * s;
+        ctx.fillStyle = color;
+        try { ctx.fillText(text, tx, cy); } catch (_) { /* invalid color → skip */ }
+        ctx.restore();
+      };
+      if (tile) {
+        // Mirror backend _tile_onto: int()-truncated pitch + floor-div offset.
+        const pitchX = Math.max(1, Math.floor(b.w * 1.6)), pitchY = Math.max(1, Math.floor(b.h * 1.6));
+        let row = 0;
+        for (let y = -b.h; y < VH; y += pitchY) {
+          const off = (row % 2) ? Math.floor(pitchX / 2) : 0;
+          for (let x = -b.w + off; x < VW; x += pitchX) drawOneText(x, y);
+          row++;
+        }
+      } else {
+        const [tx0, ty0] = anchorOf(b.w, b.h);
+        drawOneText(tx0, ty0);
+      }
+    }
+
+    // Selection rectangle around the primary box (only when placement applies).
+    if (placeable && lay.primary) {
+      const [bx, by] = anchorOf(lay.primary.w, lay.primary.h);
+      ctx.save();
+      ctx.strokeStyle = usePin ? 'rgba(99,102,241,0.95)' : 'rgba(255,255,255,0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.strokeRect(bx * s + 0.5, by * s + 0.5, lay.primary.w * s, lay.primary.h * s);
+      ctx.restore();
+    }
+  }, [frame, layout, position, customXY, opacity, color, text, fontsize, sparkle, glow, shadow, tile, placeable, logoDims]);
+
+  useEffect(() => { draw(); }, [draw]);
+
+  // ── Click / drag to place a custom position ─────────────────────────────────
+  const placeAt = useCallback((clientX, clientY) => {
+    const cv = canvasRef.current;
+    if (!cv || !frame) return;
+    const VW = frame.width, VH = frame.height;
+    const lay = layout(VW, VH);
+    const box = lay.primary;
+    if (!box) return; // nothing to place
+    const rect = cv.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dx = (clientX - rect.left) * (cv.width / rect.width);
+    const dy = (clientY - rect.top) * (cv.height / rect.height);
+    const s = cv.width / VW;
+    const cxVid = dx / s, cyVid = dy / s;
+    const x = clamp(Math.round(cxVid - box.w / 2), 0, Math.max(0, VW - box.w));
+    const y = clamp(Math.round(cyVid - box.h / 2), 0, Math.max(0, VH - box.h));
+    setCustomXY([x, y]);
+  }, [frame, layout]);
+
+  const onPointerDown = (e) => {
+    if (!interactive) return; // interactive already excludes tile/motion
+    draggingRef.current = true;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    placeAt(e.clientX, e.clientY);
+  };
+  const onPointerMove = (e) => { if (draggingRef.current) placeAt(e.clientX, e.clientY); };
+  const endDrag = () => { draggingRef.current = false; };
+
+  // Keyboard placement (accessibility): arrow keys nudge the custom position,
+  // Shift = bigger step. Seeds from the centered point if none pinned yet.
+  const nudge = useCallback((dx, dy) => {
+    if (!interactive) return;
+    const VW = frame.width, VH = frame.height;
+    const box = layout(VW, VH).primary;
+    if (!box) return;
+    const base = customXY || [Math.round((VW - box.w) / 2), Math.round((VH - box.h) / 2)];
+    const x = clamp(base[0] + dx, 0, Math.max(0, VW - box.w));
+    const y = clamp(base[1] + dy, 0, Math.max(0, VH - box.h));
+    setCustomXY([x, y]);
+  }, [interactive, frame, layout, customXY]);
+
+  const onCanvasKeyDown = (e) => {
+    const step = e.shiftKey ? 10 : 1;
+    let handled = true;
+    switch (e.key) {
+      case 'ArrowLeft': nudge(-step, 0); break;
+      case 'ArrowRight': nudge(step, 0); break;
+      case 'ArrowUp': nudge(0, -step); break;
+      case 'ArrowDown': nudge(0, step); break;
+      default: handled = false;
+    }
+    if (handled) e.preventDefault();
+  };
 
   const pickFile = (e) => {
     const f = (e.target.files || [])[0];
     e.target.value = '';
-    if (f && isVideo(f)) { setFile(f); setStatus('idle'); setSavedPath(''); }
+    if (f && isVideo(f)) { setFile(f); setStatus('idle'); setSavedPath(''); setCustomXY(null); }
     else if (f) onToast?.('Chỉ nhận video MP4/MOV');
   };
   const pickLogo = (e) => { const f = (e.target.files || [])[0]; e.target.value = ''; if (f) setLogoFile(f); };
+
+  const onPosChange = (v) => {
+    if (v === 'custom') {
+      if (!frame) { onToast?.('Hãy chờ khung xem trước rồi bấm/kéo (hoặc dùng phím mũi tên) để chọn vị trí'); return; }
+      if (!customXY) {
+        const VW = frame.width, VH = frame.height;
+        const box = layout(VW, VH).primary;
+        // Clamp the seeded center exactly like placeAt so it can never start off-frame.
+        if (box) setCustomXY([
+          clamp(Math.round((VW - box.w) / 2), 0, Math.max(0, VW - box.w)),
+          clamp(Math.round((VH - box.h) / 2), 0, Math.max(0, VH - box.h)),
+        ]);
+        else setCustomXY([0, 0]);
+      }
+    } else { setCustomXY(null); setPosition(v); }
+  };
+
+  const applyBrand = (b) => {
+    setText(b.text); setPosition(b.position); setCustomXY(null);
+    setSparkle(b.sparkle); setGlow(b.glow); setShadow(b.shadow);
+    setColor(b.color); setOpacity(b.opacity); setFontsize(b.fontsize);
+    setMotion(b.motion); setTile(false);
+    onToast?.(`Đã áp mẫu ${b.label} — chỉnh thêm trên khung xem trước nếu cần`);
+  };
 
   const run = async () => {
     if (!file || busy) return;
@@ -64,9 +369,14 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      // Only honor a pinned custom point when it actually has effect: motion
+      // and tile mode make the backend ignore position/custom_xy entirely.
+      const useCustom = !!customXY && placeable;
+      const effPos = useCustom ? 'custom' : position;
       const opts = {
-        text: text.trim(), color, opacity, position, fontsize_ratio: fontsize,
-        shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
+        text: text.trim(), color, opacity, position: effPos,
+        custom_x: useCustom ? customXY[0] : '', custom_y: useCustom ? customXY[1] : '',
+        fontsize_ratio: fontsize, shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
         logo_scale: logoScale, logo_opacity: 1.0, crf, preset: 'medium',
         hidden, password, payload,
       };
@@ -89,6 +399,8 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   };
 
   const pct = Math.round(progress * 100);
+  // Show 'custom' only when a pin is active AND effective (not under motion/tile).
+  const posValue = (customXY && placeable) ? 'custom' : position;
 
   return (
     <Box sx={{ maxWidth: 760, mx: 'auto', px: 3, py: 3, width: '100%' }}>
@@ -113,20 +425,89 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         <input ref={fileRef} type="file" hidden accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" onChange={pickFile} />
       </Paper>
 
+      {/* ── Live placement preview ─────────────────────────────────────────── */}
+      {file && (
+        <Paper variant="outlined" sx={{ p: 2, mb: 2.5 }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+            <Typography variant="subtitle2">Xem trước &amp; chọn vị trí</Typography>
+            {customXY && (
+              <Tooltip title="Về vị trí mặc định (preset)">
+                <Button size="small" color="inherit" startIcon={<RestartAltIcon />} onClick={() => setCustomXY(null)}>
+                  Bỏ ghim vị trí
+                </Button>
+              </Tooltip>
+            )}
+          </Stack>
+          <Box sx={{ textAlign: 'center', bgcolor: 'black', borderRadius: 1, overflow: 'hidden', minHeight: 80,
+            display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {previewErr ? (
+              <Typography variant="body2" color="error.main" sx={{ p: 3 }}>{previewErr}</Typography>
+            ) : (
+              <canvas
+                ref={canvasRef}
+                role="application"
+                tabIndex={interactive ? 0 : -1}
+                aria-label={`Khung xem trước watermark. ${customXY
+                  ? `Vị trí tuỳ chỉnh x ${customXY[0]}, y ${customXY[1]}.`
+                  : 'Chưa ghim vị trí.'} ${interactive
+                  ? 'Bấm hoặc kéo để chọn vị trí; phím mũi tên để dịch chuyển.'
+                  : ''}`}
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={endDrag}
+                onPointerCancel={endDrag}
+                onKeyDown={onCanvasKeyDown}
+                style={{ width: '100%', display: 'block', touchAction: 'none', outline: 'none',
+                  cursor: interactive ? 'crosshair' : 'default' }}
+              />
+            )}
+          </Box>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+            {tile ? 'Chế độ lưới chéo phủ toàn khung — không chọn vị trí.'
+              : motion !== 'none' ? 'Đang bật chuyển động — watermark sẽ di chuyển khi xuất; vị trí cố định bị bỏ qua.'
+              : customXY ? `Vị trí tuỳ chỉnh: x=${customXY[0]}, y=${customXY[1]} (bấm/kéo hoặc phím mũi tên để đổi).`
+              : position === 'random' ? 'Vị trí ngẫu nhiên — đổi mỗi lần xuất (ô minh hoạ ở giữa).'
+              : 'Bấm/kéo trên khung (hoặc phím mũi tên) để đặt vị trí tuỳ ý.'}
+          </Typography>
+          <Box sx={{ mt: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              Khung xem trước {previewBusy ? '(đang tải…)' : `(~${Math.round(previewFrac * 100)}% thời lượng)`}
+            </Typography>
+            <Slider size="small" min={0} max={1} step={0.02} value={previewFrac}
+              onChange={(_, v) => setPreviewFrac(v)}
+              onChangeCommitted={(_, v) => loadFrame(file, v)} disabled={!file} />
+          </Box>
+        </Paper>
+      )}
+
       <Stack spacing={2}>
+        <Box>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+            Mẫu thương hiệu (áp nhanh vị trí + kiểu)
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+            {BRANDS.map((b) => (
+              <Button key={b.id} size="small" variant="outlined" onClick={() => applyBrand(b)} disabled={busy}>
+                {b.label}
+              </Button>
+            ))}
+          </Stack>
+        </Box>
+
         <TextField label="Chữ watermark" size="small" fullWidth value={text}
           onChange={(e) => setText(e.target.value)} placeholder="© ACME 2026 / @username" disabled={busy} />
 
         <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', rowGap: 2 }}>
-          <FormControl size="small" sx={{ minWidth: 170 }} disabled={busy}>
+          <FormControl size="small" sx={{ minWidth: 200 }} disabled={busy || !placeable}>
             <InputLabel id="pos">Vị trí</InputLabel>
-            <Select labelId="pos" label="Vị trí" value={position} onChange={(e) => setPosition(e.target.value)}>
+            <Select labelId="pos" label="Vị trí" value={posValue} onChange={(e) => onPosChange(e.target.value)}>
               <MenuItem value="bottom-right">Dưới phải</MenuItem>
               <MenuItem value="bottom-left">Dưới trái</MenuItem>
               <MenuItem value="top-right">Trên phải</MenuItem>
               <MenuItem value="top-left">Trên trái</MenuItem>
               <MenuItem value="center">Giữa</MenuItem>
               <MenuItem value="random">Ngẫu nhiên</MenuItem>
+              <MenuItem value="custom" disabled={!frame}>Tuỳ chỉnh (bấm/kéo trên khung)</MenuItem>
             </Select>
           </FormControl>
           <FormControl size="small" sx={{ minWidth: 170 }} disabled={busy}>

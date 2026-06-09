@@ -98,6 +98,13 @@ async function grabVideoFrame(file, timeFrac = 0.5) {
   }
 }
 
+// Grab a single decoded frame (as ImageData with .width/.height) at a fraction
+// of the video duration — used by the Add-watermark tab to render a live
+// placement preview entirely client-side (no upload / no ffmpeg round-trip).
+export async function grabPreviewFrame(file, timeFrac = 0.5) {
+  return grabVideoFrame(file, timeFrac);
+}
+
 // NCC template-match of the sparkle alpha map against frame luminance.
 function locateSparkle(imageData, alpha96) {
   const { width: W, height: H, data } = imageData;

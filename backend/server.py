@@ -536,8 +536,18 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
                           opacity=opts.get("logo_opacity", 1.0)) if logo_path else None
         if text is None and logo is None:
             raise RuntimeError("cần ít nhất chữ (text) hoặc logo")
+        position = opts.get("position", "bottom-right")
+        custom_xy = None
+        cx, cy = opts.get("custom_x"), opts.get("custom_y")
+        if position == "custom":
+            if cx is None or cy is None:
+                # No coordinates supplied for a custom placement — fall back to a
+                # safe preset instead of letting VisibleWatermarker raise.
+                position = "bottom-right"
+            else:
+                custom_xy = (int(cx), int(cy))
         vw = W.VisibleWatermarker(
-            text=text, logo=logo, position=opts.get("position", "bottom-right"),
+            text=text, logo=logo, position=position, custom_xy=custom_xy,
             motion=opts.get("motion", "none"), motion_interval=opts.get("motion_interval", 3.0),
             seed=opts.get("seed"), crf=opts.get("crf", 20), preset=opts.get("preset", "medium"),
         )
@@ -583,6 +593,7 @@ async def add_watermark(
     file: UploadFile = File(...), name: str = Form(...),
     text: str = Form(""), color: str = Form("white"), opacity: str = Form("0.5"),
     position: str = Form("bottom-right"), fontsize_ratio: str = Form("0.05"),
+    custom_x: str = Form(""), custom_y: str = Form(""),
     stroke_width: str = Form("0"), shadow: str = Form("0"), rotate: str = Form("0"),
     tile: str = Form("0"), sparkle: str = Form("0"), glow: str = Form("0"),
     motion: str = Form("none"), motion_interval: str = Form("3"), seed: str = Form(""),
@@ -614,6 +625,7 @@ async def add_watermark(
     opts = {
         "text": text.strip(), "color": color or "white", "opacity": _as_float(opacity, 0.5),
         "position": position or "bottom-right", "fontsize_ratio": _as_float(fontsize_ratio, 0.05),
+        "custom_x": _as_int(custom_x), "custom_y": _as_int(custom_y),
         "stroke_width": _as_int(stroke_width, 0) or 0, "shadow": _as_bool(shadow),
         "rotate": _as_float(rotate, 0.0), "tile": _as_bool(tile),
         "sparkle": _as_bool(sparkle), "glow": _as_bool(glow),
