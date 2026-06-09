@@ -590,7 +590,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const posValue = (customXY && placeable) ? 'custom' : position;
 
   return (
-    <Box sx={{ maxWidth: 760, mx: 'auto', px: 3, py: 3, width: '100%' }}>
+    <Box sx={{ maxWidth: 1180, mx: 'auto', px: 3, py: 3, width: '100%' }}>
       {!available && (
         <Paper variant="outlined" sx={{ p: 1.5, mb: 2, borderColor: 'warning.main' }}>
           <Typography variant="body2" color="warning.main">
@@ -599,9 +599,13 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         </Paper>
       )}
 
-      <Paper
-        variant="outlined"
-        onClick={() => !busy && fileRef.current?.click()}
+      <Box sx={{ display: 'flex', gap: 3, alignItems: 'flex-start', flexDirection: { xs: 'column', md: 'row' } }}>
+        {/* ── CỘT PHẢI (md) — Video & Xem trước (review) ───────────────────── */}
+        <Box sx={{ flex: '1 1 0', minWidth: 0, width: '100%', order: { xs: 1, md: 2 },
+          position: { md: 'sticky' }, top: { md: 8 }, alignSelf: { md: 'flex-start' } }}>
+          <Paper
+            variant="outlined"
+            onClick={() => !busy && fileRef.current?.click()}
         sx={{ p: file ? 2 : 5, mb: 2.5, textAlign: 'center', cursor: busy ? 'default' : 'pointer',
           borderStyle: 'dashed', borderWidth: 2 }}
       >
@@ -666,7 +670,10 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           </Box>
         </Paper>
       )}
+        </Box>
 
+        {/* ── CỘT TRÁI (md) — Cài đặt watermark ────────────────────────────── */}
+        <Box sx={{ flex: '1 1 0', minWidth: 0, width: '100%', order: { xs: 2, md: 1 } }}>
       <Stack spacing={2}>
         <Box>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
@@ -867,6 +874,8 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           File lưu vào: <b>{outputDir || '…'}</b>
         </Typography>
       </Stack>
+        </Box>
+      </Box>
     </Box>
   );
 }
