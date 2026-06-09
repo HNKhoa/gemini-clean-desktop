@@ -301,6 +301,28 @@ def open_path(path: str = Form(...)):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/api/reveal-path")
+def reveal_path(path: str = Form(...)):
+    """Open the output folder with the given file highlighted/selected (must be
+    inside the output folder)."""
+    try:
+        p = pathlib.Path(path).resolve()
+        out = output_dir().resolve()
+        if out != p and out not in p.parents:
+            return JSONResponse({"ok": False, "error": "path outside output folder"}, status_code=403)
+        if not p.exists():
+            return JSONResponse({"ok": False, "error": "file not found"}, status_code=404)
+        if sys.platform.startswith("win"):
+            subprocess.run(["explorer", f"/select,{p}"], check=False)  # explorer returns 1 even on success
+        elif sys.platform == "darwin":
+            subprocess.run(["open", "-R", str(p)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(p.parent)], check=False)
+        return {"ok": True}
+    except Exception as e:  # pragma: no cover
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 # ── AI inpaint (LaMa) — optional high-quality video watermark removal ─────────
 def _model_ready() -> bool:
     try:
@@ -588,8 +610,19 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
         if job.get("cancel"):
             raise RuntimeError("cancelled")
         folder = output_dir()
-        base = safe_name(os.path.splitext(orig_name)[0]) or "video"
-        target = unique_path(folder, f"wm_{base}.mp4")
+        stem = safe_name(os.path.splitext(orig_name)[0]) or "video"
+        raw = (opts.get("text") or "").strip()
+        # Sanitize the watermark text inline (safe_name() returns a .png fallback
+        # for empty input, which we don't want as a name token).
+        wm = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw).strip(". ")[:60]
+        mode = opts.get("name_mode", "name_text")
+        if mode == "text_only" and wm:
+            fname = f"{wm}.mp4"
+        elif mode == "name_text":
+            fname = f"{stem}_{wm}.mp4" if wm else f"{stem}_wm.mp4"
+        else:  # 'wm_prefix' (and text_only fallback when there is no text)
+            fname = f"wm_{stem}.mp4"
+        target = unique_path(folder, fname)
         _move(out_tmp, str(target))
         size = target.stat().st_size
         conn = db()
@@ -621,7 +654,7 @@ async def add_watermark(
     tile: str = Form("0"), sparkle: str = Form("0"), glow: str = Form("0"),
     motion: str = Form("none"), motion_interval: str = Form("3"), seed: str = Form(""),
     logo_scale: str = Form("0.15"), logo_opacity: str = Form("1.0"),
-    crf: str = Form("20"), preset: str = Form("medium"),
+    crf: str = Form("20"), preset: str = Form("medium"), name_mode: str = Form("name_text"),
     hidden: str = Form("0"), password: str = Form(""), payload: str = Form(""),
     logo: UploadFile = File(None),
 ):
@@ -656,7 +689,8 @@ async def add_watermark(
         "motion": motion or "none", "motion_interval": _as_float(motion_interval, 3.0),
         "seed": _as_int(seed), "logo_scale": _as_float(logo_scale, 0.15),
         "logo_opacity": _as_float(logo_opacity, 1.0), "crf": _as_int(crf, 20) or 20,
-        "preset": preset or "medium", "hidden": _as_bool(hidden),
+        "preset": preset or "medium", "name_mode": name_mode or "name_text",
+        "hidden": _as_bool(hidden),
         "password": password, "payload": (payload or "").strip(),
     }
     wm_jobs[job_id] = {"status": "queued", "progress": 0, "cancel": False}

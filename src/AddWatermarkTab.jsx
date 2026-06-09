@@ -11,6 +11,7 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import { apiFetch, addWatermark, getWmStatus, grabPreviewFrame } from './engine.js';
 
 const isVideo = (f) => /^video\/(mp4|quicktime)$/.test(f.type) || /\.(mp4|mov|m4v)$/i.test(f.name);
@@ -173,6 +174,8 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const [font, setFont] = useState('arial');
   const [outlineWidth, setOutlineWidth] = useState(0); // viền chữ: 0 = tắt, else fraction of size
   const [logoScale, setLogoScale] = useState(0.15);
+  const [logoLib, setLogoLib] = useState([]); // {name, file, url} from a chosen folder
+  const [nameMode, setNameMode] = useState('name_text'); // output filename scheme
   const [tile, setTile] = useState(false);
   const [sparkle, setSparkle] = useState(false);
   const [glow, setGlow] = useState(false);
@@ -200,12 +203,14 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
 
   const fileRef = useRef(null);
   const logoRef = useRef(null);
+  const logoDirRef = useRef(null);
   const abortRef = useRef(null);
   const canvasRef = useRef(null);
   const frameCanvasRef = useRef(null); // hidden full-res frame buffer
   const logoImgRef = useRef(null);
   const dragRef = useRef(null); // null | 'move' | 'resize:text' | 'resize:logo'
   const loadSeqRef = useRef(0); // monotonic id so out-of-order frame loads are dropped
+  const logoLibRef = useRef([]); // mirror of logoLib for unmount cleanup
   const busy = status === 'processing';
   const placeable = motion === 'none' && !tile; // position only matters when static & not tiled
   const interactive = !!frame && !busy && placeable;
@@ -215,6 +220,14 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const outlineColor = hexLuminance(colorHex) > 0.5 ? '#000000' : '#ffffff';
 
   useEffect(() => { getWmStatus().then((s) => setAvailable(!!(s && s.available === true))).catch(() => setAvailable(false)); }, []);
+
+  // Turn the hidden logo input into a FOLDER picker + revoke thumbnail URLs on unmount.
+  useEffect(() => { logoLibRef.current = logoLib; }, [logoLib]);
+  useEffect(() => {
+    const el = logoDirRef.current;
+    if (el) { el.setAttribute('webkitdirectory', ''); el.setAttribute('directory', ''); }
+    return () => { logoLibRef.current.forEach((l) => URL.revokeObjectURL(l.url)); };
+  }, []);
 
   // ── Frame loading ─────────────────────────────────────────────────────────
   const loadFrame = useCallback(async (f, frac) => {
@@ -501,6 +514,26 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   };
   const pickLogo = (e) => { const f = (e.target.files || [])[0]; e.target.value = ''; if (f) setLogoFile(f); };
 
+  // Pick a FOLDER of logos -> show its images as a clickable thumbnail library.
+  const pickLogoDir = (e) => {
+    const all = [...(e.target.files || [])];
+    e.target.value = '';
+    const imgs = all.filter((f) => /\.(png|jpe?g|webp)$/i.test(f.name));
+    logoLib.forEach((l) => URL.revokeObjectURL(l.url)); // free the previous batch
+    const lib = imgs.slice(0, 60).map((f) => ({ name: f.name, file: f, url: URL.createObjectURL(f) }));
+    setLogoLib(lib);
+    if (!imgs.length) onToast?.('Thư mục không có ảnh PNG/JPG/WebP');
+    else onToast?.(`Đã nạp ${lib.length} logo từ thư mục` + (imgs.length > lib.length ? ` (hiện ${lib.length}/${imgs.length})` : ''));
+  };
+
+  // Use a logo from the chosen folder as the watermark (brand-style defaults).
+  const applyLibLogo = (l) => {
+    if (busy) return;
+    setLogoFile(l.file); setText(''); setPosition('bottom-right'); setCustomXY(null);
+    setOpacity(0.65); setLogoScale(0.22); setMotion('none'); setTile(false);
+    onToast?.('Đã chọn logo: ' + l.name);
+  };
+
   const onPosChange = (v) => {
     if (v === 'custom') {
       if (!frame) { onToast?.('Hãy chờ khung xem trước rồi bấm/kéo (hoặc dùng phím mũi tên) để chọn vị trí'); return; }
@@ -565,7 +598,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
         fontsize_ratio: fontsize, stroke_width: strokeW, stroke_color: outlineColor,
         shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
         logo_scale: logoScale, logo_opacity: opacity, crf, preset: 'medium',
-        hidden, password, payload,
+        name_mode: nameMode, hidden, password, payload,
       };
       const out = await addWatermark(file, logoFile, opts, (p, i) => { setProgress(p); setInfo(i); }, controller.signal);
       setStatus('done'); setProgress(1); setSavedPath(out.path); setHiddenBytes(out.hiddenBytes ?? null);
@@ -583,6 +616,15 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     if (!savedPath) return;
     const fd = new FormData(); fd.append('path', savedPath);
     apiFetch('/api/open-path', { method: 'POST', body: fd }).catch(() => {});
+  };
+  // Open the output folder with the just-saved file highlighted.
+  const openFolder = () => {
+    if (savedPath) {
+      const fd = new FormData(); fd.append('path', savedPath);
+      apiFetch('/api/reveal-path', { method: 'POST', body: fd }).catch(() => {});
+    } else {
+      apiFetch('/api/open-output', { method: 'POST' }).catch(() => {});
+    }
   };
 
   const pct = Math.round(progress * 100);
@@ -785,7 +827,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
 
         <Box>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-            Logo thương hiệu Xưởng AI (bấm để dùng ngay — không cần chọn file)
+            Logo có sẵn — bấm để dùng ngay (Xưởng AI), hoặc chọn cả thư mục logo của bạn
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
             {BRAND_LOGOS.map((b) => (
@@ -794,7 +836,28 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
                 {b.label}
               </Button>
             ))}
+            <Button size="small" variant="outlined" startIcon={<FolderOpenIcon />}
+              onClick={() => logoDirRef.current?.click()} disabled={busy}>
+              Chọn thư mục logo…
+            </Button>
+            <input ref={logoDirRef} type="file" hidden multiple
+              accept="image/png,image/webp,image/jpeg" onChange={pickLogoDir} />
           </Stack>
+          {logoLib.length > 0 && (
+            <Box sx={{ mt: 1, display: 'flex', flexWrap: 'wrap', gap: 1, maxHeight: 168, overflowY: 'auto' }}>
+              {logoLib.map((l) => (
+                <Tooltip key={l.name} title={l.name} arrow>
+                  <Box component="button" type="button" disabled={busy} onClick={() => applyLibLogo(l)}
+                    sx={{ width: 56, height: 56, p: 0.5, borderRadius: 1, bgcolor: '#1b1b1b', cursor: 'pointer',
+                      border: '2px solid', borderColor: logoFile && logoFile.name === l.name ? 'primary.main' : 'divider',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Box component="img" src={l.url} alt={l.name}
+                      sx={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                  </Box>
+                </Tooltip>
+              ))}
+            </Box>
+          )}
         </Box>
 
         <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap', rowGap: 1 }}>
@@ -812,11 +875,19 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
               <MenuItem value={14}>Rất cao – chữ nét nhất (CRF 14)</MenuItem>
             </Select>
           </FormControl>
+          <FormControl size="small" sx={{ minWidth: 200 }} disabled={busy}>
+            <InputLabel id="nm">Tên file lưu</InputLabel>
+            <Select labelId="nm" label="Tên file lưu" value={nameMode} onChange={(e) => setNameMode(e.target.value)}>
+              <MenuItem value="name_text">Tên gốc + chữ watermark</MenuItem>
+              <MenuItem value="text_only">Chỉ chữ watermark</MenuItem>
+              <MenuItem value="wm_prefix">wm_ + tên gốc</MenuItem>
+            </Select>
+          </FormControl>
         </Stack>
         {logoFile && (
           <Box>
-            <Typography variant="caption" color="text.secondary">Độ rộng logo (theo bề ngang video; hoặc kéo ô vuông của khung logo khi đã ghim vị trí): {logoScale.toFixed(2)}</Typography>
-            <Slider size="small" min={0.05} max={0.5} step={0.01} value={logoScale} disabled={busy} onChange={(_, v) => setLogoScale(v)} />
+            <Typography variant="caption" color="text.secondary">Kích thước (độ rộng) logo theo bề ngang video — hoặc kéo ô vuông của khung logo trên khung xem trước: {logoScale.toFixed(2)}</Typography>
+            <Slider size="small" min={0.05} max={0.6} step={0.01} value={logoScale} disabled={busy} onChange={(_, v) => setLogoScale(v)} />
           </Box>
         )}
 
@@ -849,6 +920,11 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           {status === 'done' && (
             <Tooltip title="Mở video kết quả">
               <IconButton color="success" onClick={openResult}><PlayArrowIcon /></IconButton>
+            </Tooltip>
+          )}
+          {status === 'done' && (
+            <Tooltip title="Mở thư mục chứa file">
+              <IconButton onClick={openFolder}><FolderOpenIcon /></IconButton>
             </Tooltip>
           )}
           {status === 'done' && <Chip size="small" color="success" icon={<CheckCircleIcon />} label="Xong" />}
