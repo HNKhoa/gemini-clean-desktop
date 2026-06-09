@@ -42,17 +42,37 @@ const BRANDS = [
     note: 'Runway: logo tĩnh "ở góc" trên bản free — nguồn KHÔNG nêu rõ góc nào (độ tin cậy thấp); tạm để dưới-phải, chỉnh thêm nếu cần.' },
 ];
 
+// Fonts. `file` is the Windows font-file basename the backend resolves against
+// C:\Windows\Fonts (Pillow); `css`/`weight` drive the live preview so it matches.
+// These ship with Windows 10/11; the backend falls back to Arial if missing.
+const FONTS = [
+  { file: 'arial', label: 'Arial', css: 'Arial', weight: 'normal' },
+  { file: 'arialbd', label: 'Arial Bold', css: 'Arial', weight: 'bold' },
+  { file: 'segoeui', label: 'Segoe UI', css: 'Segoe UI', weight: 'normal' },
+  { file: 'segoeuib', label: 'Segoe UI Bold', css: 'Segoe UI', weight: 'bold' },
+  { file: 'calibri', label: 'Calibri', css: 'Calibri', weight: 'normal' },
+  { file: 'tahoma', label: 'Tahoma', css: 'Tahoma', weight: 'normal' },
+  { file: 'verdana', label: 'Verdana', css: 'Verdana', weight: 'normal' },
+  { file: 'verdanab', label: 'Verdana Bold', css: 'Verdana', weight: 'bold' },
+  { file: 'trebuc', label: 'Trebuchet MS', css: 'Trebuchet MS', weight: 'normal' },
+  { file: 'georgia', label: 'Georgia', css: 'Georgia', weight: 'normal' },
+  { file: 'times', label: 'Times New Roman', css: 'Times New Roman', weight: 'normal' },
+  { file: 'impact', label: 'Impact', css: 'Impact', weight: 'normal' },
+  { file: 'comic', label: 'Comic Sans MS', css: 'Comic Sans MS', weight: 'normal' },
+];
+const fontDefOf = (fileTok) => FONTS.find((f) => f.file === fileTok) || FONTS[0];
+
 // Offscreen canvas used only to measure text width (replicates Pillow's tile math).
 const _mcv = typeof document !== 'undefined' ? document.createElement('canvas') : null;
 const _mctx = _mcv ? _mcv.getContext('2d') : null;
 
 // Size of the rendered text tile in VIDEO pixels — mirrors
 // VisibleWatermarker._render_text_tile so the preview box matches the export.
-function textTileBox(VH, { text, fontsize, sparkle, glow, shadow }) {
+function textTileBox(VH, { text, fontsize, sparkle, glow, shadow, fontCss = 'Arial', fontWeight = 'normal' }) {
   const size = Math.max(8, Math.floor(VH * fontsize));
   let tw = 0, th = 0;
   if (_mctx) {
-    _mctx.font = `${size}px Arial, sans-serif`;
+    _mctx.font = `${fontWeight} ${size}px "${fontCss}", sans-serif`;
     const m = _mctx.measureText(text || ' ');
     tw = Math.ceil(m.width);
     th = Math.round((m.actualBoundingBoxAscent || 0) + (m.actualBoundingBoxDescent || 0));
@@ -108,6 +128,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const [color, setColor] = useState('white');
   const [opacity, setOpacity] = useState(0.6);
   const [fontsize, setFontsize] = useState(0.05);
+  const [font, setFont] = useState('arial');
   const [logoScale, setLogoScale] = useState(0.15);
   const [tile, setTile] = useState(false);
   const [sparkle, setSparkle] = useState(false);
@@ -145,6 +166,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   const busy = status === 'processing';
   const placeable = motion === 'none' && !tile; // position only matters when static & not tiled
   const interactive = !!frame && !busy && placeable;
+  const fontDef = fontDefOf(font); // {css, weight} for the live preview
 
   useEffect(() => { getWmStatus().then((s) => setAvailable(!!(s && s.available === true))).catch(() => setAvailable(false)); }, []);
 
@@ -196,7 +218,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
   // ── Layout helpers (video px) ───────────────────────────────────────────────
   const layout = useCallback((VW, VH) => {
     const out = {};
-    if (text.trim()) out.text = textTileBox(VH, { text, fontsize, sparkle, glow, shadow });
+    if (text.trim()) out.text = textTileBox(VH, { text, fontsize, sparkle, glow, shadow, fontCss: fontDef.css, fontWeight: fontDef.weight });
     if (logoImgRef.current && logoDims && logoDims.w > 0 && logoDims.h > 0) {
       let lw = Math.max(2, Math.round(VW * logoScale));
       lw -= lw % 2;
@@ -205,7 +227,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
     }
     out.primary = out.text || out.logo || null;
     return out;
-  }, [text, fontsize, sparkle, glow, shadow, logoScale, logoDims]);
+  }, [text, fontsize, sparkle, glow, shadow, logoScale, logoDims, fontDef.css, fontDef.weight]);
 
   // ── Preview draw ────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -245,7 +267,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       const drawOneText = (x, y) => {
         ctx.save();
         ctx.globalAlpha = clamp(opacity, 0, 1);
-        ctx.font = `${b.size * s}px Arial, sans-serif`;
+        ctx.font = `${fontDef.weight} ${b.size * s}px "${fontDef.css}", sans-serif`;
         ctx.textBaseline = 'middle';
         if (glow) { ctx.shadowColor = 'rgba(255,255,255,0.95)'; ctx.shadowBlur = b.size * 0.18 * s * 2; }
         else if (shadow) { ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowOffsetX = 2 * s; ctx.shadowOffsetY = 2 * s; }
@@ -302,7 +324,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       }
       ctx.restore();
     }
-  }, [frame, layout, position, customXY, opacity, color, text, fontsize, sparkle, glow, shadow, tile, placeable, logoDims]);
+  }, [frame, layout, position, customXY, opacity, color, text, fontsize, sparkle, glow, shadow, tile, placeable, logoDims, fontDef.css, fontDef.weight]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -464,7 +486,7 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
       const useCustom = !!customXY && placeable;
       const effPos = useCustom ? 'custom' : position;
       const opts = {
-        text: text.trim(), color, opacity, position: effPos,
+        text: text.trim(), color, opacity, position: effPos, font,
         custom_x: useCustom ? customXY[0] : '', custom_y: useCustom ? customXY[1] : '',
         fontsize_ratio: fontsize, shadow, rotate: 0, tile, sparkle, glow, motion, motion_interval: 3,
         logo_scale: logoScale, logo_opacity: 1.0, crf, preset: 'medium',
@@ -591,8 +613,22 @@ export default function AddWatermarkTab({ outputDir, onToast }) {
           </Typography>
         </Box>
 
-        <TextField label="Chữ watermark" size="small" fullWidth value={text}
-          onChange={(e) => setText(e.target.value)} placeholder="© ACME 2026 / @username" disabled={busy} />
+        <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', rowGap: 2 }}>
+          <TextField label="Chữ watermark" size="small" sx={{ flexGrow: 1, minWidth: 240 }} value={text}
+            onChange={(e) => setText(e.target.value)} placeholder="© ACME 2026 / @username" disabled={busy} />
+          <FormControl size="small" sx={{ minWidth: 190 }} disabled={busy}>
+            <InputLabel id="font">Font chữ</InputLabel>
+            <Select labelId="font" label="Font chữ" value={font} onChange={(e) => setFont(e.target.value)}
+              renderValue={(v) => fontDefOf(v).label}>
+              {FONTS.map((f) => (
+                <MenuItem key={f.file} value={f.file}
+                  style={{ fontFamily: f.css, fontWeight: f.weight }}>
+                  {f.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Stack>
 
         <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', rowGap: 2 }}>
           <FormControl size="small" sx={{ minWidth: 200 }} disabled={busy || !placeable}>

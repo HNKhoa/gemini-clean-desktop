@@ -500,6 +500,18 @@ def _as_int(v, default=None):
         return default
 
 
+def _safe_font(v):
+    """A bare font filename/name only — block path separators / traversal so the
+    value can't be coerced into loading an arbitrary file. Pillow's _load_font
+    resolves it against the Windows Fonts dir (falling back to Arial)."""
+    v = (v or "").strip()
+    if not v or "/" in v or "\\" in v or ".." in v:
+        return "arial.ttf"
+    if not v.lower().endswith((".ttf", ".otf")):
+        v = v + ".ttf"
+    return v
+
+
 def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
     job = wm_jobs[job_id]
     out_tmp = os.path.join(job_dir, "out.mp4")
@@ -527,6 +539,7 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
         if opts.get("text"):
             text = W.TextSpec(
                 text=opts["text"], color=opts.get("color", "white"),
+                font=opts.get("font") or "arial.ttf",
                 opacity=opts.get("opacity", 0.5), fontsize_ratio=opts.get("fontsize_ratio", 0.05),
                 stroke_width=opts.get("stroke_width", 0), shadow=opts.get("shadow", False),
                 rotate=opts.get("rotate", 0.0), tile=opts.get("tile", False),
@@ -593,7 +606,7 @@ async def add_watermark(
     file: UploadFile = File(...), name: str = Form(...),
     text: str = Form(""), color: str = Form("white"), opacity: str = Form("0.5"),
     position: str = Form("bottom-right"), fontsize_ratio: str = Form("0.05"),
-    custom_x: str = Form(""), custom_y: str = Form(""),
+    font: str = Form("arial.ttf"), custom_x: str = Form(""), custom_y: str = Form(""),
     stroke_width: str = Form("0"), shadow: str = Form("0"), rotate: str = Form("0"),
     tile: str = Form("0"), sparkle: str = Form("0"), glow: str = Form("0"),
     motion: str = Form("none"), motion_interval: str = Form("3"), seed: str = Form(""),
@@ -625,7 +638,7 @@ async def add_watermark(
     opts = {
         "text": text.strip(), "color": color or "white", "opacity": _as_float(opacity, 0.5),
         "position": position or "bottom-right", "fontsize_ratio": _as_float(fontsize_ratio, 0.05),
-        "custom_x": _as_int(custom_x), "custom_y": _as_int(custom_y),
+        "font": _safe_font(font), "custom_x": _as_int(custom_x), "custom_y": _as_int(custom_y),
         "stroke_width": _as_int(stroke_width, 0) or 0, "shadow": _as_bool(shadow),
         "rotate": _as_float(rotate, 0.0), "tile": _as_bool(tile),
         "sparkle": _as_bool(sparkle), "glow": _as_bool(glow),
