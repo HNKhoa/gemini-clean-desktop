@@ -60,13 +60,13 @@ Reverse-alpha removes the logo but can leave a faint trace on sharp/structured b
 - **Quality**: Settings → "Chất lượng video AI" — Standard (CRF 18, default), High (CRF 16), or Near-lossless (CRF 12, ~2–3× the file, slower). Resolution is preserved and the original audio is copied losslessly at every level; only the (unavoidable) single video re-encode differs. The source is already lossy, so CRF 12 is the practical ceiling.
 - Slower than the instant reverse-alpha path — intended for when you need a perfectly clean result. The toggle is off by default; the app falls back to reverse-alpha if ffmpeg/onnxruntime are unavailable.
 
-> AI inpaint is verified via the **`update.bat` (source) run**, which installs onnxruntime/numpy/Pillow. The current `package.bat` portable build ships the standard reverse-alpha method only.
+> AI inpaint works in **both** the `update.bat` (source) run **and** the `package.bat` standalone build (which bundles a CPU `onnxruntime`). It runs on CPU; for NVIDIA-GPU speed run `setup-gpu.bat` on the source instead.
 
 ## Add watermark (second tab)
 Adds your own watermark to a video, in the backend (numpy + Pillow + ffmpeg):
 - **Visible**: text and/or a logo PNG — position, opacity, colour, font size, diagonal tile, drop-shadow, a Gemini/Veo-style spark ✦ + glow, and motion (static / random jumps / DVD bounce). The original audio is copied untouched.
 - **Invisible (advanced)**: a robust, blind payload embedded in the frequency domain (survives re-encode); extract later with the same password + byte count.
-- Needs numpy + Pillow (core deps, installed by `update.bat`) and **ffmpeg** on PATH. Like AI inpaint, this runs from the **`update.bat` (source) run**; the portable build shows it as unavailable. Output is saved as `wm_<name>.mp4`.
+- Needs numpy + Pillow (core deps, installed by `update.bat`) and **ffmpeg** on PATH. Works in the `update.bat` (source) run **and** the `package.bat` standalone build (numpy/Pillow/ffmpeg are bundled). Output filename follows the "Tên file" option (default: original name + watermark text).
 
 ## Notes & limitations
 - Removes the **visible** watermark only — invisible provenance marks (e.g. **SynthID**) remain.
@@ -78,12 +78,12 @@ Adds your own watermark to a video, in the backend (numpy + Pillow + ffmpeg):
 Two `.bat` files in the project root:
 
 - **`update.bat`** — daily use. Installs/updates deps, rebuilds the frontend, and launches the app. Run it after editing code. Keep the console window open while using the app.
-- **`package.bat`** — builds a **standalone** app that runs on a PC **without Node/Python**. It always rebuilds first (latest code + engine), bundles the Python backend with PyInstaller, then packages with electron-builder:
-  - Output **single file** → `release\GeminiClean-1.0.0-portable.exe` (requires Windows **Developer Mode ON**, because electron-builder's signing helper extracts symlinks).
-  - If Developer Mode is OFF it **automatically falls back** to a folder build → `release\win-unpacked\Gemini Clean.exe` (zip the folder to share). Both are fully standalone.
-  - To get the single file: Windows **Settings → Privacy & security → For developers → Developer Mode = On**, then run `package.bat` again.
+- **`package.bat`** — builds a **full standalone** app that runs on a PC with **nothing installed** (no Node, Python or ffmpeg). It rebuilds the frontend, bundles the Python backend with PyInstaller (`--onedir`, CPU `onnxruntime`) in an isolated build venv, bundles `ffmpeg`/`ffprobe`, then packages a folder with electron-builder:
+  - Output **folder** → `release\win-unpacked\` (run `Gemini Clean.exe`). **Zip the whole folder and send it** — the other PC needs nothing installed.
+  - Includes **everything**: watermark removal, **Add-watermark**, and **AI inpaint** (runs on CPU; for NVIDIA-GPU speed run `setup-gpu.bat` on the source instead).
+  - It is large (**~800 MB**, mostly ffmpeg + onnxruntime + Electron). AI inpaint downloads its ~88 MB model on first use (needs internet once); removal + Add-watermark work fully offline.
 
-> Note: the standalone app still saves cleaned files to `Downloads\GeminiClean` and stores settings/history in `%USERPROFILE%\.gemini-clean`.
+> Note: the standalone app saves cleaned/output files to `Downloads\GeminiClean` and stores settings/history in `%USERPROFILE%\.gemini-clean`.
 
 ## Credits & license
 Watermark engine: gemini-watermark-remover (MIT — see `public/engine/vendor/gwr/LICENSE`).

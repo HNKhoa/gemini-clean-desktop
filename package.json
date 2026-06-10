@@ -46,8 +46,12 @@
         "to": "app-dist"
       },
       {
-        "from": "backend/pybuild/gcd-backend.exe",
-        "to": "gcd-backend.exe"
+        "from": "backend/pybuild/gcd-backend",
+        "to": "gcd-backend"
+      },
+      {
+        "from": "backend/pybuild/ffmpeg",
+        "to": "ffmpeg"
       }
     ],
     "win": {

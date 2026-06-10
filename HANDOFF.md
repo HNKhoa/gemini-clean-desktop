@@ -9,7 +9,7 @@
 
 1. **`CLAUDE.md` trong thư mục KHÔNG mô tả dự án này.** File đó nói về một app "Studio Downloader" (Python/PyWebView). **Bỏ qua nó.** Dự án thật là **Gemini Clean** — Electron + React/MUI (Vite) + Python FastAPI. Theme dùng **cam `#e0863f`**, không phải indigo.
 2. **Backend KHÔNG tự xoá watermark.** Việc xoá watermark ảnh/video chạy trong **engine JS phía trình duyệt** (Canvas/WebCodecs). Backend FastAPI chỉ: lưu file đã xử lý, settings/history (SQLite), mở thư mục, và chạy 2 loại job nền (**AI inpaint** + **Thêm watermark**).
-3. **Hai chế độ "nặng" (AI inpaint + Thêm watermark) chỉ chạy ở bản nguồn (`update.bat`)**, không có trong bản portable `.exe` (PyInstaller không bundle onnxruntime/numpy/Pillow). Khi không khả dụng, UI tự hiện cảnh báo và disable nút.
+3. **`package.bat` giờ tạo bản standalone ĐẦY ĐỦ** (thư mục `release\win-unpacked\`, ~800MB): gói cả AI inpaint (CPU onnxruntime), Thêm watermark (numpy/Pillow) và ffmpeg/ffprobe — chạy trên máy **không cài gì**. (Trước đây bản portable chỉ có Xoá watermark.) AI inpaint chạy CPU; muốn GPU NVIDIA thì chạy bản nguồn + `setup-gpu.bat`. Model LaMa ~88MB tải lần đầu (cần internet 1 lần); Xoá + Thêm watermark chạy offline.
 
 ---
 
@@ -25,7 +25,7 @@ Python FastAPI (backend/)     →  /api: save, settings, history, open/reveal, A
 **3 chế độ chạy** (electron/main.cjs, cờ `DEV = process.env.ELECTRON_DEV === '1'`):
 - **Dev** (`npm run dev`): Vite :5173, backend do npm chạy (`python backend/server.py`), Electron load `http://localhost:5173`, `/api` proxy về :8000.
 - **Local prod** (`npm start`): Electron spawn `python backend/server.py`, phục vụ `./dist`, **port động** (getFreePort, fallback 8000), truyền `GCD_PORT` + `GCD_DIST_DIR` qua env.
-- **Packaged** (`.exe`): chạy `gcd-backend.exe` (PyInstaller) + `app-dist`, đều là `extraResources` cạnh app.
+- **Packaged** (folder build): `main.cjs` chạy `resources\gcd-backend\gcd-backend.exe` (PyInstaller --onedir) + `app-dist` + prepend `resources\ffmpeg` vào PATH — tất cả là `extraResources`.
 
 **Script `.bat` (chạy ở thư mục gốc, Windows):**
 | Script | Việc làm |
@@ -33,7 +33,7 @@ Python FastAPI (backend/)     →  /api: save, settings, history, open/reveal, A
 | `update.bat` | **Dùng hằng ngày.** npm install → pip install requirements.txt (fatal) → nếu có `onnxruntime-gpu` thì GIỮ NGUYÊN, ngược lại cài `requirements-ai.txt` **non-fatal** → `npm run build` → `npm start`. Phải giữ cửa sổ console mở khi dùng. |
 | `run.bat` | Mở nhanh, **không** rebuild/cài lại (cần sẵn `node_modules` + `dist`). |
 | `setup-gpu.bat` | **Phát hiện card + menu chọn**: [1] NVIDIA CUDA (`requirements-ai-cuda.txt`), [2] AMD/Intel DirectML (`requirements-ai.txt`), [3] CPU (`onnxruntime` thuần), [0] thoát. Gỡ cả 3 gói onnxruntime trước. ⚠️ Chỉ **CUDA** tăng tốc thật cho LaMa; AMD/Intel/CPU đều chạy CPU (DirectML không chạy được mô hình). Tự gợi ý theo card (NVIDIA ưu tiên). **Chế độ tự động (deploy nhiều máy):** truyền tham số `auto` (tự chọn theo card) / `nvidia`\|`cuda` / `amd`\|`intel`\|`dml` / `cpu` → bỏ menu + bỏ `pause` (đặt cờ `NONINTERACTIVE`); `help`/`/?` in hướng dẫn. Vẫn cần thư mục dự án (đọc `backend\requirements-ai*.txt`). |
-| `package.bat` | Build EXE độc lập: PyInstaller → `gcd-backend.exe`, electron-builder portable. Cần **Windows Developer Mode ON** (nếu OFF → fallback `release\win-unpacked`). |
+| `package.bat` | Build **standalone ĐẦY ĐỦ** (folder `release\win-unpacked\`, ~800MB, zip để gửi). Tạo venv build riêng (CPU onnxruntime → không đụng CUDA global), PyInstaller `--onedir` gói numpy/Pillow/watermark/lama_video/onnxruntime + `--add-data` alpha (đường dẫn TUYỆT ĐỐI), copy ffmpeg/ffprobe, rồi `electron-builder --win dir`. Có tham số/finder Python. |
 | `push.bat` | git add -A → commit (hỏi message) → git push. |
 
 **Lệnh npm:** `dev`, `dev:vite`, `dev:backend`, `dev:electron`, `build` (vite build → `dist/`), `start` (electron .), `package`.
@@ -182,8 +182,9 @@ e12481f..e7bdb8f  AI inpaint (LaMa) + quality selector + CUDA + DirectML→CPU f
 - 1 slider opacity điều khiển **cả** chữ và logo (`opacity` + `logo_opacity=opacity`).
 - `_model_ready` chỉ kiểm **kích thước** (sai số 1 MiB), KHÔNG kiểm SHA256 (chỉ kiểm lúc tải).
 - `open-path`/`reveal-path` kiểm chứa-trong-output **tại thời điểm gọi** — đổi output dir trong settings làm các path history cũ ngoài thư mục mới thành 403.
-- `*.exe` bị gitignore — `gcd-backend.exe` luôn là artifact build cục bộ (`package.bat`), không có trong repo; `npm run package` đơn lẻ sẽ fail nếu chưa build exe.
-- Bản portable: AI inpaint + Thêm watermark **không khả dụng** (cần `update.bat`).
+- `*.exe`, `release/`, `backend/pybuild/` bị gitignore — artifact build cục bộ (`package.bat`), không có trong repo. `electron-builder` đơn lẻ sẽ fail nếu chưa chạy PyInstaller + copy ffmpeg vào `backend\pybuild\`.
+- `--add-data` của PyInstaller phải dùng **đường dẫn tuyệt đối** cho alpha (`%~dp0backend\lama_alpha96.f32`) vì `--specpath` làm PyInstaller resolve nguồn tương đối SAI. Alpha/model resolve qua `__file__`→`_MEIPASS` khi frozen (không cần sửa code).
+- Build dùng **venv riêng** (`backend\pybuild\venv`) cài CPU `onnxruntime` — KHÔNG cài vào Python global (giữ nguyên CUDA của dev). Đừng bundle `onnxruntime-gpu` vào portable (cần CUDA DLL, không chạy mọi máy).
 - Trên Windows phải `taskkill /T /F` để diệt backend (PyInstaller onefile sinh tiến trình con; `proc.kill()` để sót server giữ port + endpoint ghi).
 - `processImage` không throw khi fail (trả ảnh gốc `applied:false`); phát hiện hủy dựa trên regex `/cancel/i` trong message — đừng đổi message lỗi.
 - **Các `.bat` dò Python bằng cách CHẠY THỬ** (`py -3` → `python` → `py` → `python3`), KHÔNG dùng `where python` (sẽ dính alias Microsoft Store → báo nhầm "có Python" rồi `python` in "Python was not found"). `update.bat`/`run.bat` đặt `GCD_PYTHON` = đường dẫn exe thật cho `electron/main.cjs` (local-prod) dùng spawn backend.

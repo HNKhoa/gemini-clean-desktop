@@ -365,19 +365,29 @@ def _download_model(job=None):
         raise
 
 
+def _has_module(name: str) -> bool:
+    """Is an importable module present? find_spec is light, but in a PyInstaller
+    frozen build it can be unreliable for lazily/hidden-imported modules, so fall
+    back to an actual import (cached in sys.modules after the first success)."""
+    if name in sys.modules:
+        return True
+    try:
+        if importlib.util.find_spec(name) is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
 def _ai_available():
     """The AI feature can actually run only if onnxruntime + the lama_video module +
     the alpha template + ffmpeg are all present (e.g. NOT in the portable build)."""
-    try:
-        ort_ok = importlib.util.find_spec("onnxruntime") is not None
-    except Exception:
-        ort_ok = False
-    try:
-        lama_ok = importlib.util.find_spec("lama_video") is not None
-    except Exception:
-        lama_ok = False
     ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
-    return ort_ok and lama_ok and ffmpeg_ok and ALPHA_FILE.exists()
+    return _has_module("onnxruntime") and _has_module("lama_video") and ffmpeg_ok and ALPHA_FILE.exists()
 
 
 @app.get("/api/ai-status")
@@ -489,12 +499,7 @@ def ai_cancel(job_id: str):
 
 # ── Add watermark (visible overlay + optional hidden payload) ─────────────────
 def _wm_available() -> bool:
-    try:
-        ok = (importlib.util.find_spec("watermark") is not None
-              and importlib.util.find_spec("numpy") is not None
-              and importlib.util.find_spec("PIL") is not None)
-    except Exception:
-        ok = False
+    ok = _has_module("watermark") and _has_module("numpy") and _has_module("PIL")
     return ok and bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 
