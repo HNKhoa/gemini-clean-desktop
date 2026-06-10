@@ -2,7 +2,9 @@
 # update.bat installs these NON-FATALLY: if they can't install (e.g. Python < 3.10,
 # where onnxruntime ships no wheel) the app still runs the standard reverse-alpha
 # method and only AI inpaint is unavailable. AI inpaint also needs ffmpeg/ffprobe
-# on PATH. On Windows, onnxruntime-directml gives GPU acceleration with CPU fallback.
+# on PATH. On Windows this is the DirectML build — but LaMa's Fourier-conv ops
+# can't run on DirectML, so AI inpaint falls back to CPU (only NVIDIA CUDA, via
+# setup-gpu.bat / requirements-ai-cuda.txt, actually accelerates it).
 onnxruntime-directml>=1.20.0 ; sys_platform == "win32" and python_version >= "3.10"
 onnxruntime>=1.20.0 ; sys_platform != "win32" and python_version >= "3.10"
 numpy>=1.24.0 ; python_version >= "3.10"

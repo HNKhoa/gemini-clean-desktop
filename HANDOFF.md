@@ -32,7 +32,7 @@ Python FastAPI (backend/)     →  /api: save, settings, history, open/reveal, A
 |---|---|
 | `update.bat` | **Dùng hằng ngày.** npm install → pip install requirements.txt (fatal) → nếu có `onnxruntime-gpu` thì GIỮ NGUYÊN, ngược lại cài `requirements-ai.txt` **non-fatal** → `npm run build` → `npm start`. Phải giữ cửa sổ console mở khi dùng. |
 | `run.bat` | Mở nhanh, **không** rebuild/cài lại (cần sẵn `node_modules` + `dist`). |
-| `setup-gpu.bat` | Chạy 1 lần cho GPU NVIDIA: gỡ cả 3 gói onnxruntime rồi cài `requirements-ai-cuda.txt` (onnxruntime-gpu + CUDA12 wheels). |
+| `setup-gpu.bat` | **Phát hiện card + menu chọn**: [1] NVIDIA CUDA (`requirements-ai-cuda.txt`), [2] AMD/Intel DirectML (`requirements-ai.txt`), [3] CPU (`onnxruntime` thuần), [0] thoát. Gỡ cả 3 gói onnxruntime trước. ⚠️ Chỉ **CUDA** tăng tốc thật cho LaMa; AMD/Intel/CPU đều chạy CPU (DirectML không chạy được mô hình). Tự gợi ý theo card (NVIDIA ưu tiên). |
 | `package.bat` | Build EXE độc lập: PyInstaller → `gcd-backend.exe`, electron-builder portable. Cần **Windows Developer Mode ON** (nếu OFF → fallback `release\win-unpacked`). |
 | `push.bat` | git add -A → commit (hỏi message) → git push. |
 
