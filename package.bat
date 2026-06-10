@@ -17,9 +17,16 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] Python not found. Install from https://python.org then run again.
+REM Find a REAL Python (a plain "where python" is fooled by the Microsoft Store alias).
+set "PY="
+for %%I in ("py -3" "python" "py" "python3") do (
+  if not defined PY (
+    %%~I -c "import sys" >nul 2>nul && set "PY=%%~I"
+  )
+)
+if not defined PY (
+  echo [ERROR] No real Python found. Install Python from https://python.org and TICK "Add Python to PATH",
+  echo         or turn off the Store alias in Settings ^> Apps ^> App execution aliases.
   pause
   exit /b 1
 )
@@ -30,9 +37,9 @@ if errorlevel 1 ( echo. & echo [ERROR] npm install failed. & pause & exit /b 1 )
 
 echo.
 echo [2/5] Installing Python packages + PyInstaller...
-python -m pip install -q -r backend\requirements.txt
+%PY% -m pip install -q -r backend\requirements.txt
 if errorlevel 1 ( echo. & echo [ERROR] pip install failed. & pause & exit /b 1 )
-python -m pip install -q pyinstaller
+%PY% -m pip install -q pyinstaller
 if errorlevel 1 ( echo. & echo [ERROR] PyInstaller install failed. & pause & exit /b 1 )
 
 echo.
@@ -43,7 +50,7 @@ if errorlevel 1 ( echo. & echo [ERROR] Frontend build failed. & pause & exit /b 
 echo.
 echo [4/5] Bundling Python backend into gcd-backend.exe...
 if exist "backend\pybuild" rmdir /s /q "backend\pybuild"
-python -m PyInstaller --onefile --noconsole --noconfirm --name gcd-backend --distpath backend\pybuild --workpath backend\pybuild\work --specpath backend\pybuild --collect-submodules uvicorn --collect-submodules fastapi --collect-submodules starlette --hidden-import h11 --hidden-import python_multipart --hidden-import multipart --hidden-import anyio backend\server.py
+%PY% -m PyInstaller --onefile --noconsole --noconfirm --name gcd-backend --distpath backend\pybuild --workpath backend\pybuild\work --specpath backend\pybuild --collect-submodules uvicorn --collect-submodules fastapi --collect-submodules starlette --hidden-import h11 --hidden-import python_multipart --hidden-import multipart --hidden-import anyio backend\server.py
 if errorlevel 1 ( echo. & echo [ERROR] PyInstaller failed. & pause & exit /b 1 )
 
 echo.

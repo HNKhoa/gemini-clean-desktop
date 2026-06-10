@@ -16,9 +16,19 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] Python not found. Install it from https://python.org then run again.
+REM --- Find a REAL Python (a plain "where python" is fooled by the Microsoft
+REM     Store alias, which then prints "Python was not found" and does nothing). ---
+set "PY="
+for %%I in ("py -3" "python" "py" "python3") do (
+  if not defined PY (
+    %%~I -c "import sys" >nul 2>nul && set "PY=%%~I"
+  )
+)
+if not defined PY (
+  echo [ERROR] No real Python found. Either:
+  echo   1^) Install Python from https://python.org and TICK "Add Python to PATH", or
+  echo   2^) Turn off the Store alias: Settings ^> Apps ^> Advanced app settings
+  echo      ^> App execution aliases ^> turn off "python.exe" and "python3.exe".
   echo.
   pause
   exit /b 1
@@ -37,17 +47,17 @@ if errorlevel 1 (
 REM --- 2. Python dependencies -----------------------------------------
 echo.
 echo [2/4] Installing / updating Python packages...
-python -m pip install -q -r backend\requirements.txt
+%PY% -m pip install -q -r backend\requirements.txt
 if errorlevel 1 (
   echo.
   echo [ERROR] "pip install" failed. See messages above.
   pause
   exit /b 1
 )
-python -m pip show onnxruntime-gpu >nul 2>nul
+%PY% -m pip show onnxruntime-gpu >nul 2>nul
 if errorlevel 1 (
   echo       Installing optional AI inpaint packages ^(safe to skip on failure^)...
-  python -m pip install -q -r backend\requirements-ai.txt
+  %PY% -m pip install -q -r backend\requirements-ai.txt
   if errorlevel 1 (
     echo [WARN] AI inpaint packages not installed ^(needs Python 3.10+^). App runs without AI inpaint.
   )
@@ -71,6 +81,9 @@ echo.
 echo [4/4] Starting Gemini Clean...
 echo       (Keep this window open while you use the app. Closing it stops the app.)
 echo.
+REM Pass the exact Python we found to the app (so the backend launches even when
+REM only the `py` launcher exists or `python` isn't on PATH).
+for /f "delims=" %%E in ('%PY% -c "import sys;print(sys.executable)" 2^>nul') do set "GCD_PYTHON=%%E"
 call npm start
 
 echo.

@@ -186,6 +186,8 @@ e12481f..e7bdb8f  AI inpaint (LaMa) + quality selector + CUDA + DirectML→CPU f
 - Bản portable: AI inpaint + Thêm watermark **không khả dụng** (cần `update.bat`).
 - Trên Windows phải `taskkill /T /F` để diệt backend (PyInstaller onefile sinh tiến trình con; `proc.kill()` để sót server giữ port + endpoint ghi).
 - `processImage` không throw khi fail (trả ảnh gốc `applied:false`); phát hiện hủy dựa trên regex `/cancel/i` trong message — đừng đổi message lỗi.
+- **Các `.bat` dò Python bằng cách CHẠY THỬ** (`py -3` → `python` → `py` → `python3`), KHÔNG dùng `where python` (sẽ dính alias Microsoft Store → báo nhầm "có Python" rồi `python` in "Python was not found"). `update.bat`/`run.bat` đặt `GCD_PYTHON` = đường dẫn exe thật cho `electron/main.cjs` (local-prod) dùng spawn backend.
+- ⚠️ **Trong batch, ECHO chứa `(` `)` nằm trong khối `if (...)` sẽ làm đóng khối sớm** → câu `exit /b 1` chạy vô điều kiện (đã từng làm run.bat/package.bat luôn báo lỗi Python kể cả khi có Python). Luôn escape `^(` `^)` hoặc bỏ ngoặc trong các echo nằm trong `( )`.
 
 ---
 

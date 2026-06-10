@@ -38,7 +38,10 @@ function startBackend() {
     distDir = path.join(process.resourcesPath, 'app-dist');
   } else {
     // Local prod (npm start): run Python on the source, serve ./dist.
-    cmd = process.platform === 'win32' ? 'python' : 'python3';
+    // GCD_PYTHON (set by update.bat/run.bat to the resolved interpreter path)
+    // takes precedence so the backend launches even when `python` isn't on PATH
+    // (e.g. a `py`-launcher-only install) or is shadowed by the MS Store alias.
+    cmd = process.env.GCD_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
     args = [path.join(__dirname, '..', 'backend', 'server.py')];
     distDir = path.join(__dirname, '..', 'dist');
   }

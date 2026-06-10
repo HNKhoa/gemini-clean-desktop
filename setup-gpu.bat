@@ -34,12 +34,24 @@ echo     nen AMD/Intel se tu lui ve CPU. Chi NVIDIA CUDA tang toc that.
 echo     (Che do xoa watermark thuong cho video KHONG can GPU.)
 echo.
 
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] Khong tim thay Python. Cai tu https://python.org roi chay lai.
+REM ---------- Tim Python THAT (tranh alias Microsoft Store) ----------
+REM `where python` se thay alias Store va bao nham la "co Python"; ta chay thu
+REM mot lenh that su (alias Store tra ma loi khac 0 nen bi loai).
+set "PY="
+for %%I in ("py -3" "python" "py" "python3") do (
+  if not defined PY (
+    %%~I -c "import sys" >nul 2>nul && set "PY=%%~I"
+  )
+)
+if not defined PY (
+  echo [ERROR] Khong tim thay Python THAT su ^(co the may chi co alias Microsoft Store^).
+  echo   - Cai Python tu https://python.org  -- NHO tick "Add Python to PATH".
+  echo   - Hoac tat alias: Settings ^> Apps ^> Advanced app settings ^> App execution aliases
+  echo     ^> tat "python.exe" va "python3.exe", roi chay lai.
   if not defined NONINTERACTIVE pause
   exit /b 1
 )
+echo Dung Python: %PY%
 
 REM ---------- Phat hien card man hinh ----------
 set "HASNV="
@@ -100,7 +112,7 @@ if "%CHOICE%"=="0" exit /b 0
 :dispatch
 echo.
 echo [1/2] Go cac ban onnxruntime dang co (tranh xung dot giua cac ban)...
-python -m pip uninstall -y onnxruntime onnxruntime-directml onnxruntime-gpu
+%PY% -m pip uninstall -y onnxruntime onnxruntime-directml onnxruntime-gpu
 
 echo.
 if "%CHOICE%"=="1" goto :cuda
@@ -112,21 +124,21 @@ exit /b 1
 
 :cuda
 echo [2/2] Cai ban CUDA (NVIDIA) + thu vien CUDA 12 (vai tram MB)...
-python -m pip install -r backend\requirements-ai-cuda.txt
+%PY% -m pip install -r backend\requirements-ai-cuda.txt
 if errorlevel 1 goto :fail
 set "MSG=Da cai NVIDIA CUDA. Settings se hien 'GPU' khi CUDA hoat dong; neu CUDA khong khoi dong duoc, app tu lui ve CPU."
 goto :done
 
 :dml
 echo [2/2] Cai ban DirectML (AMD / Intel) + numpy + Pillow...
-python -m pip install -r backend\requirements-ai.txt
+%PY% -m pip install -r backend\requirements-ai.txt
 if errorlevel 1 goto :fail
 set "MSG=Da cai DirectML cho AMD/Intel. LUU Y: AI inpaint (LaMa) van chay bang CPU. Voi card AMD/Intel nen dung che do xoa watermark thuong cho video (khong can GPU)."
 goto :done
 
 :cpu
 echo [2/2] Cai ban CPU (onnxruntime thuan) + numpy + Pillow...
-python -m pip install "onnxruntime>=1.20.0" "numpy>=1.24.0" "Pillow>=10.0.0"
+%PY% -m pip install "onnxruntime>=1.20.0" "numpy>=1.24.0" "Pillow>=10.0.0"
 if errorlevel 1 goto :fail
 set "MSG=Da cai ban CPU. AI inpaint chay bang CPU (cham hon nhung van sach nhat)."
 goto :done
