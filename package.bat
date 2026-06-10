@@ -6,10 +6,11 @@ cd /d "%~dp0"
 echo ==================================================
 echo    GEMINI CLEAN  -  Build Standalone (FULL)
 echo ==================================================
-echo Builds a self-contained app that runs WITHOUT Node.js or Python,
-echo bundling: watermark removal + Add-watermark (numpy/Pillow/ffmpeg)
-echo + AI inpaint (onnxruntime CPU; model auto-downloads on first use).
-echo Output is a FOLDER (release\win-unpacked) - zip it and send it.
+echo Builds a self-contained app that runs WITHOUT Node.js or Python.
+echo Bundles: watermark removal + Add-watermark (numpy/Pillow) + AI inpaint
+echo (onnxruntime CPU). ffmpeg (~100MB) and the AI model (~88MB) are NOT bundled
+echo - the client downloads them once on first use. Output is a FOLDER
+echo (release\win-unpacked) - zip it and send it.
 echo.
 
 where node >nul 2>nul
@@ -31,23 +32,12 @@ if not defined PY (
   pause & exit /b 1
 )
 
-REM Locate ffmpeg/ffprobe to bundle (Add-watermark + AI inpaint need them).
-set "FFMPEG="
-set "FFPROBE="
-for /f "delims=" %%F in ('where ffmpeg 2^>nul') do if not defined FFMPEG set "FFMPEG=%%F"
-for /f "delims=" %%F in ('where ffprobe 2^>nul') do if not defined FFPROBE set "FFPROBE=%%F"
-if not defined FFMPEG (
-  echo [ERROR] ffmpeg/ffprobe not found on PATH - they must be bundled for Add-watermark + AI inpaint.
-  echo         Install ffmpeg (e.g. "winget install Gyan.FFmpeg") then run again.
-  pause & exit /b 1
-)
-
-echo [1/6] Installing / updating Node packages...
+echo [1/5] Installing / updating Node packages...
 call npm install
 if errorlevel 1 ( echo. & echo [ERROR] npm install failed. & pause & exit /b 1 )
 
 echo.
-echo [2/6] Preparing an isolated Python build env (CPU onnxruntime, so the bundle
+echo [2/5] Preparing an isolated Python build env (CPU onnxruntime, so the bundle
 echo       runs on ANY machine and your CUDA setup is left untouched)...
 set "VENV=backend\pybuild\venv"
 set "VPY=%VENV%\Scripts\python.exe"
@@ -60,14 +50,15 @@ if not exist "%VPY%" (
 if errorlevel 1 ( echo. & echo [ERROR] pip install into build env failed. & pause & exit /b 1 )
 
 echo.
-echo [3/6] Building frontend with LATEST data (Vite)...
+echo [3/5] Building frontend with LATEST data (Vite)...
 call npm run build
 if errorlevel 1 ( echo. & echo [ERROR] Frontend build failed. & pause & exit /b 1 )
 
 echo.
-echo [4/6] Bundling Python backend into gcd-backend (PyInstaller --onedir)...
+echo [4/5] Bundling Python backend into gcd-backend (PyInstaller --onedir)...
 if exist "backend\pybuild\gcd-backend" rmdir /s /q "backend\pybuild\gcd-backend"
 if exist "backend\pybuild\work" rmdir /s /q "backend\pybuild\work"
+if exist "backend\pybuild\ffmpeg" rmdir /s /q "backend\pybuild\ffmpeg"
 "%VPY%" -m PyInstaller --onedir --noconsole --noconfirm --name gcd-backend ^
   --distpath backend\pybuild --workpath backend\pybuild\work --specpath backend\pybuild ^
   --paths backend ^
@@ -82,16 +73,7 @@ if exist "backend\pybuild\work" rmdir /s /q "backend\pybuild\work"
 if errorlevel 1 ( echo. & echo [ERROR] PyInstaller failed. & pause & exit /b 1 )
 
 echo.
-echo [5/6] Bundling ffmpeg/ffprobe...
-if exist "backend\pybuild\ffmpeg" rmdir /s /q "backend\pybuild\ffmpeg"
-mkdir "backend\pybuild\ffmpeg"
-copy /y "%FFMPEG%" "backend\pybuild\ffmpeg\" >nul
-copy /y "%FFPROBE%" "backend\pybuild\ffmpeg\" >nul
-echo       ffmpeg:  %FFMPEG%
-echo       ffprobe: %FFPROBE%
-
-echo.
-echo [6/6] Packaging standalone app folder...
+echo [5/5] Packaging standalone app folder...
 set CSC_IDENTITY_AUTO_DISCOVERY=false
 call npx --yes electron-builder --win dir
 if errorlevel 1 ( echo. & echo [ERROR] electron-builder failed. & pause & exit /b 1 )
@@ -102,9 +84,9 @@ echo  DONE (folder build)
 echo  App:    release\win-unpacked\Gemini Clean.exe
 echo  Share:  ZIP the whole  release\win-unpacked  folder and send it.
 echo          The other PC needs NOTHING installed.
-echo  Note:   AI inpaint downloads its model (~88MB) on first use (needs internet
-echo          once) and runs on CPU; for NVIDIA speed run setup-gpu.bat on the
-echo          source instead. Add-watermark + removal work fully offline.
+echo  Note:   On first use, AI inpaint downloads its model (~88MB) and the app
+echo          downloads ffmpeg (~100MB) - both once, needs internet that one time.
+echo          AI inpaint runs on CPU; for NVIDIA speed run setup-gpu.bat on source.
 echo ==================================================
 echo.
 pause

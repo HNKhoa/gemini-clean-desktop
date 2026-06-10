@@ -30,15 +30,13 @@ function startBackend() {
   let cmd;
   let args;
   let distDir;
-  let ffmpegDir = null;
   if (app.isPackaged) {
     // Packaged: run the PyInstaller backend (a --onedir folder) + serve the
-    // bundled frontend, both shipped as extraResources next to the app. The
-    // bundled ffmpeg/ffprobe go on PATH so the backend (shutil.which) finds them.
+    // bundled frontend, both shipped as extraResources next to the app. ffmpeg
+    // is NOT bundled — the backend downloads it on first use (ensure_ffmpeg).
     cmd = path.join(process.resourcesPath, 'gcd-backend', 'gcd-backend.exe');
     args = [];
     distDir = path.join(process.resourcesPath, 'app-dist');
-    ffmpegDir = path.join(process.resourcesPath, 'ffmpeg');
   } else {
     // Local prod (npm start): run Python on the source, serve ./dist.
     // GCD_PYTHON (set by update.bat/run.bat to the resolved interpreter path)
@@ -50,7 +48,6 @@ function startBackend() {
   }
 
   const env = { ...process.env, GCD_DIST_DIR: distDir, GCD_PORT: String(PORT) };
-  if (ffmpegDir) env.PATH = ffmpegDir + path.delimiter + (env.PATH || '');
   backendProc = spawn(cmd, args, {
     // Discard stdio in the packaged GUI app (no console attached); inherit for
     // local/dev runs so logs show in the terminal. windowsHide stops a console

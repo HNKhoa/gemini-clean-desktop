@@ -24,6 +24,7 @@ import hashlib
 import threading
 import importlib.util
 import urllib.request
+import zipfile
 
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form
@@ -56,6 +57,12 @@ LAMA_REV = "aee6d22f0a13e5e35af1c9a1c3afd62841fc6f3f"
 LAMA_URL = f"https://huggingface.co/opencv/inpainting_lama/resolve/{LAMA_REV}/inpainting_lama_2025jan.onnx"
 LAMA_SIZE = 92591623  # bytes (Apache-2.0, opencv/inpainting_lama)
 LAMA_SHA256 = "7df918ac3921d3daf0aae1d219776cf0dc4e4935f035af81841b40adcf74fdf2"
+# ffmpeg is NOT bundled (it is large + downloadable); fetch it once on first use
+# to the data dir. Pinned + SHA-256 verified gyan.dev essentials build.
+BIN_DIR = DATA_DIR / "bin"
+FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.1-essentials_build.zip"
+FFMPEG_SHA256 = "6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541"
+_ffmpeg_lock = threading.Lock()
 ai_jobs = {}  # job_id -> progress dict (in-memory; single-user desktop)
 _ai_sema = threading.Semaphore(1)  # at most one heavy AI job runs at a time
 wm_jobs = {}  # add-watermark jobs
@@ -365,6 +372,93 @@ def _download_model(job=None):
         raise
 
 
+def _ffmpeg_on_path() -> bool:
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def _prepend_path(d) -> None:
+    d = str(d)
+    if d not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+def _ffmpeg_obtainable() -> bool:
+    """ffmpeg is usable now, already downloaded, or downloadable (Windows)."""
+    return (_ffmpeg_on_path() or (BIN_DIR / "ffmpeg.exe").exists()
+            or sys.platform.startswith("win"))
+
+
+def ensure_ffmpeg(job=None) -> None:
+    """Guarantee ffmpeg+ffprobe are usable. If not on PATH, download a pinned,
+    SHA-256-verified gyan.dev build ONCE to ~/.gemini-clean/bin and prepend it to
+    PATH — so the standalone build can ship WITHOUT ffmpeg and the client fetches
+    it on first use. Raises with install guidance if it can't be obtained."""
+    if _ffmpeg_on_path():
+        return
+    with _ffmpeg_lock:  # only one download even if a wm + ai job start together
+        if _ffmpeg_on_path():
+            return
+        ff, fp = BIN_DIR / "ffmpeg.exe", BIN_DIR / "ffprobe.exe"
+        if ff.exists() and fp.exists():
+            _prepend_path(BIN_DIR)
+            if _ffmpeg_on_path():
+                return
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("ffmpeg/ffprobe not found — please install ffmpeg "
+                               "(e.g. 'brew install ffmpeg' or 'apt install ffmpeg').")
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = str(BIN_DIR / "ffmpeg_dl.zip.part")
+        try:
+            if job is not None:
+                job["stage"], job["progress"] = "ffmpeg", 0
+            req = urllib.request.Request(FFMPEG_URL, headers={"User-Agent": "gemini-clean"})
+            h = hashlib.sha256()
+            with urllib.request.urlopen(req, timeout=60) as r:
+                total = int(r.headers.get("Content-Length", 0) or 0)
+                done = 0
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        h.update(chunk)
+                        done += len(chunk)
+                        if job is not None and total:
+                            job["stage"], job["progress"] = "ffmpeg", round(done / total, 4)
+            if h.hexdigest() != FFMPEG_SHA256:
+                raise RuntimeError(f"ffmpeg download checksum mismatch (got {h.hexdigest()[:12]}…)")
+            # Extract to .part then rename, so a crash mid-extraction never leaves
+            # a half-written binary that the next call mistakes for "installed".
+            ff_part, fp_part = str(ff) + ".part", str(fp) + ".part"
+            got = set()
+            with zipfile.ZipFile(tmp) as zf:
+                for member in zf.namelist():
+                    if member.endswith("/"):
+                        continue
+                    name = os.path.basename(member)  # strips any path -> no zip-slip
+                    dest = {"ffmpeg.exe": ff_part, "ffprobe.exe": fp_part}.get(name)
+                    if dest:
+                        with zf.open(member) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        got.add(name)
+            if got != {"ffmpeg.exe", "ffprobe.exe"}:
+                raise RuntimeError("ffmpeg archive did not contain ffmpeg.exe/ffprobe.exe")
+            os.replace(ff_part, str(ff))
+            os.replace(fp_part, str(fp))
+            os.remove(tmp)
+        except Exception:
+            for leftover in (tmp, str(ff) + ".part", str(fp) + ".part"):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+            raise
+        _prepend_path(BIN_DIR)
+        if not _ffmpeg_on_path():
+            raise RuntimeError("ffmpeg unpacked but still not resolvable on PATH")
+
+
 def _has_module(name: str) -> bool:
     """Is an importable module present? find_spec is light, but in a PyInstaller
     frozen build it can be unreliable for lazily/hidden-imported modules, so fall
@@ -386,8 +480,8 @@ def _has_module(name: str) -> bool:
 def _ai_available():
     """The AI feature can actually run only if onnxruntime + the lama_video module +
     the alpha template + ffmpeg are all present (e.g. NOT in the portable build)."""
-    ffmpeg_ok = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
-    return _has_module("onnxruntime") and _has_module("lama_video") and ffmpeg_ok and ALPHA_FILE.exists()
+    return (_has_module("onnxruntime") and _has_module("lama_video")
+            and ALPHA_FILE.exists() and _ffmpeg_obtainable())
 
 
 @app.get("/api/ai-status")
@@ -416,6 +510,7 @@ def _run_ai_job(job_id, in_path, orig_name, job_dir):
         if job.get("cancel"):
             raise RuntimeError("cancelled")
         job["status"] = "downloading"
+        ensure_ffmpeg(job)   # fetch ffmpeg on first use (not bundled)
         _download_model(job)
         job["status"] = "processing"
         job["stage"] = "inpaint"
@@ -500,7 +595,7 @@ def ai_cancel(job_id: str):
 # ── Add watermark (visible overlay + optional hidden payload) ─────────────────
 def _wm_available() -> bool:
     ok = _has_module("watermark") and _has_module("numpy") and _has_module("PIL")
-    return ok and bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    return ok and _ffmpeg_obtainable()
 
 
 @app.get("/api/wm-status")
@@ -549,6 +644,7 @@ def _run_wm_job(job_id, in_path, logo_path, orig_name, opts, job_dir):
         if job.get("cancel"):
             raise RuntimeError("cancelled")
         job["status"] = "processing"
+        ensure_ffmpeg(job)   # fetch ffmpeg on first use (not bundled)
         job["stage"] = "watermark"
         job["progress"] = 0.3
         import watermark as W

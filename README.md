@@ -24,7 +24,7 @@ public/engine/      → reused watermark engine (gwr + mp4box/mp4-muxer + worker
 ## Prerequisites
 - Node.js 18+ and npm
 - Python 3.9+ for the core app (**Python 3.10+** for the optional **AI inpaint** mode — onnxruntime has no 3.9 wheel)
-- **ffmpeg** on PATH — only needed for the optional **AI inpaint** video mode
+- **ffmpeg** — needed for AI inpaint + Add-watermark; if it isn't on PATH the app downloads a pinned, checksum-verified build once on first use (to `%USERPROFILE%\.gemini-clean\bin`)
 
 ## Setup
 ```bash
@@ -66,7 +66,7 @@ Reverse-alpha removes the logo but can leave a faint trace on sharp/structured b
 Adds your own watermark to a video, in the backend (numpy + Pillow + ffmpeg):
 - **Visible**: text and/or a logo PNG — position, opacity, colour, font size, diagonal tile, drop-shadow, a Gemini/Veo-style spark ✦ + glow, and motion (static / random jumps / DVD bounce). The original audio is copied untouched.
 - **Invisible (advanced)**: a robust, blind payload embedded in the frequency domain (survives re-encode); extract later with the same password + byte count.
-- Needs numpy + Pillow (core deps, installed by `update.bat`) and **ffmpeg** on PATH. Works in the `update.bat` (source) run **and** the `package.bat` standalone build (numpy/Pillow/ffmpeg are bundled). Output filename follows the "Tên file" option (default: original name + watermark text).
+- Needs numpy + Pillow (core deps, installed by `update.bat`) and **ffmpeg** (auto-downloaded on first use if missing). Works in the `update.bat` (source) run **and** the `package.bat` standalone build. Output filename follows the "Tên file" option (default: original name + watermark text).
 
 ## Notes & limitations
 - Removes the **visible** watermark only — invisible provenance marks (e.g. **SynthID**) remain.
@@ -78,10 +78,10 @@ Adds your own watermark to a video, in the backend (numpy + Pillow + ffmpeg):
 Two `.bat` files in the project root:
 
 - **`update.bat`** — daily use. Installs/updates deps, rebuilds the frontend, and launches the app. Run it after editing code. Keep the console window open while using the app.
-- **`package.bat`** — builds a **full standalone** app that runs on a PC with **nothing installed** (no Node, Python or ffmpeg). It rebuilds the frontend, bundles the Python backend with PyInstaller (`--onedir`, CPU `onnxruntime`) in an isolated build venv, bundles `ffmpeg`/`ffprobe`, then packages a folder with electron-builder:
+- **`package.bat`** — builds a **full standalone** app that runs on a PC with **nothing installed** (no Node, Python or ffmpeg). It rebuilds the frontend, bundles the Python backend with PyInstaller (`--onedir`, CPU `onnxruntime`) in an isolated build venv, then packages a folder with electron-builder:
   - Output **folder** → `release\win-unpacked\` (run `Gemini Clean.exe`). **Zip the whole folder and send it** — the other PC needs nothing installed.
   - Includes **everything**: watermark removal, **Add-watermark**, and **AI inpaint** (runs on CPU; for NVIDIA-GPU speed run `setup-gpu.bat` on the source instead).
-  - It is large (**~800 MB**, mostly ffmpeg + onnxruntime + Electron). AI inpaint downloads its ~88 MB model on first use (needs internet once); removal + Add-watermark work fully offline.
+  - **~370 MB.** Downloadable parts are fetched on the client on **first use** (once, needs internet that one time): **ffmpeg** (~100 MB, for Add-watermark + AI inpaint) and the **AI model** (~88 MB). Watermark removal works fully offline immediately.
 
 > Note: the standalone app saves cleaned/output files to `Downloads\GeminiClean` and stores settings/history in `%USERPROFILE%\.gemini-clean`.
 

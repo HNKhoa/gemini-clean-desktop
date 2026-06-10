@@ -48,10 +48,6 @@
       {
         "from": "backend/pybuild/gcd-backend",
         "to": "gcd-backend"
-      },
-      {
-        "from": "backend/pybuild/ffmpeg",
-        "to": "ffmpeg"
       }
     ],
     "win": {
