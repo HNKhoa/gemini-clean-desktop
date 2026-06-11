@@ -5,6 +5,9 @@ python-multipart>=0.0.9
 # "Add watermark" tab (renders frames with numpy + Pillow; needs ffmpeg on PATH).
 numpy>=1.24.0
 Pillow>=10.0.0
+# CA bundle for HTTPS downloads (ffmpeg + AI model) — the packaged build / some
+# Pythons can't find the system CA store, which would fail TLS verification.
+certifi>=2024.2.2
 # (optional) imageio-ffmpeg — only a fallback if no system ffmpeg is on PATH.
 # Optional "AI inpaint" deps live in requirements-ai.txt (installed non-fatally by
 # update.bat) so a missing/incompatible wheel never blocks the core app from launching.

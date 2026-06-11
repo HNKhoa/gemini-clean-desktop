@@ -65,7 +65,7 @@ if exist "backend\pybuild\ffmpeg" rmdir /s /q "backend\pybuild\ffmpeg"
   --collect-submodules uvicorn --collect-submodules fastapi --collect-submodules starlette ^
   --hidden-import h11 --hidden-import python_multipart --hidden-import multipart --hidden-import anyio ^
   --hidden-import lama_video --collect-submodules watermark ^
-  --collect-all onnxruntime ^
+  --collect-all onnxruntime --hidden-import certifi --collect-data certifi ^
   --hidden-import PIL.Image --hidden-import PIL.ImageDraw --hidden-import PIL.ImageFont ^
   --hidden-import PIL.ImageFilter --hidden-import PIL.ImageColor ^
   --add-data "%~dp0backend\lama_alpha96.f32;." ^

@@ -21,6 +21,7 @@ import subprocess
 import shutil
 import uuid
 import hashlib
+import ssl
 import threading
 import importlib.util
 import urllib.request
@@ -338,6 +339,17 @@ def _model_ready() -> bool:
         return False
 
 
+def _https_ctx():
+    """TLS context using certifi's CA bundle. The packaged build (and some Python
+    installs) can't reach the system CA store, which raises
+    CERTIFICATE_VERIFY_FAILED on HTTPS downloads — certifi fixes that everywhere."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _download_model(job=None):
     if _model_ready():
         return
@@ -346,7 +358,7 @@ def _download_model(job=None):
     try:
         req = urllib.request.Request(LAMA_URL, headers={"User-Agent": "gemini-clean"})
         h = hashlib.sha256()
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=60, context=_https_ctx()) as r:
             total = int(r.headers.get("Content-Length", LAMA_SIZE) or LAMA_SIZE)
             done = 0
             with open(tmp, "wb") as f:
@@ -413,7 +425,7 @@ def ensure_ffmpeg(job=None) -> None:
                 job["stage"], job["progress"] = "ffmpeg", 0
             req = urllib.request.Request(FFMPEG_URL, headers={"User-Agent": "gemini-clean"})
             h = hashlib.sha256()
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=60, context=_https_ctx()) as r:
                 total = int(r.headers.get("Content-Length", 0) or 0)
                 done = 0
                 with open(tmp, "wb") as f:
